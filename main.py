@@ -16,6 +16,7 @@ ALLOWED_ORIGINS = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -26,61 +27,70 @@ def root():
     return {"status": "backend ok"}
 
 
-# ------------ PARSER LOGIC (ported from TS) -----------------
+# --------- PARSER LOGIC (Python version of your TS parseResumeText) ---------
 
 
 def parse_resume_text(text: str) -> Dict[str, Any]:
-    # basic line cleaning
-    raw_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    lower_lines = [ln.lower() for ln in raw_lines]
-    clean_text = " ".join(lower_lines)
+    # Lines and lowercased versions
+    raw_lines: List[str] = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip()
+    ]
+    lower_lines: List[str] = [l.lower() for l in raw_lines]
+    clean_text: str = " ".join(lower_lines)
 
     # ---- Name ----
-    name = ""
+    name: str = ""
     for line in raw_lines:
         words = line.split()
         if 2 <= len(words) <= 5 and re.search(r"[a-zA-Z]", line):
-            name = line
+            name = line.strip()
             break
 
     # ---- Email ----
-    email_match = re.search(
-        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", clean_text
+    email_match = re.findall(
+        r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+        clean_text,
     )
-    email = email_match.group(0) if email_match else ""
+    email: str = email_match[0] if email_match else ""
 
     # ---- Phone ----
-    phone_regex = re.compile(
-        r"(\+?\d{1,3}[-.\s]?)?(\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}"
+    phone_matches = re.findall(
+        r"(\+?\d{1,3}[-.\s]?)?(\(?\d{2,4}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}",
+        clean_text,
     )
-    phone_matches = [
-        re.sub(r"[^\d+]", "", m.group(0))
-        for m in phone_regex.finditer(clean_text)
-    ]
-    phone = ""
-    for p in phone_matches:
+    phones_clean: List[str] = []
+    for groups in phone_matches:
+        joined = "".join(groups)
+        cleaned = re.sub(r"[^\d+]", "", joined)
+        if cleaned:
+            phones_clean.append(cleaned)
+
+    phone: str = ""
+    for p in phones_clean:
         if 10 <= len(p) <= 15:
             phone = p
             break
-    if not phone and phone_matches:
-        phone = phone_matches[0]
+    if not phone and phones_clean:
+        phone = phones_clean[0]
 
     # ---- Location ----
-    location = ""
+    location: str = ""
     for line in raw_lines:
-        match = re.search(r"[A-Za-z .]+,\s*[A-Za-z]{2,}", line)
-        if match and "email" not in match.group(0).lower():
-            location = match.group(0).strip()
+        m = re.search(r"[A-Za-z .]+,\s*[A-Za-z]{2,}", line)
+        if m and "email" not in m.group(0).lower():
+            location = m.group(0).strip()
             break
 
-    # ---- Experience Years ----
+    # ---- Experience years ----
     total_years: Optional[float] = None
-    exp_patterns = [
-        re.compile(r"(\d+(?:\.\d+)?)\s*(?:\+?\s*)?(?:years?|yrs?|yoe)"),
-        re.compile(r"experience[:\s]+(\d+(?:\.\d+)?)"),
+    patterns = [
+        r"(\d+(?:\.\d+)?)\s*(?:\+?\s*)?(?:years?|yrs?|yoe)",
+        r"experience[:\s]+(\d+(?:\.\d+)?)",
     ]
-    for pat in exp_patterns:
-        m = pat.search(clean_text)
+    for pat in patterns:
+        m = re.search(pat, clean_text, re.IGNORECASE)
         if m:
             try:
                 total_years = float(m.group(1))
@@ -88,18 +98,19 @@ def parse_resume_text(text: str) -> Dict[str, Any]:
             except ValueError:
                 pass
 
-    # ---- Role level / primary role ----
-    role_patterns = {
-        "Senior": re.compile(r"(senior|sr\.?|lead|principal|staff)"),
-        "Junior": re.compile(r"(junior|jr\.?)"),
-        "Manager": re.compile(r"(manager|director|head)"),
-    }
+    # ---- Role level & primary role ----
     role_level = "Mid"
-    for lvl, rgx in role_patterns.items():
-        if rgx.search(clean_text):
+    role_patterns = {
+        "Senior": r"(senior|sr\.?|lead|principal|staff)",
+        "Junior": r"(junior|jr\.?)",
+        "Manager": r"(manager|director|head)",
+    }
+    for lvl, pat in role_patterns.items():
+        if re.search(pat, clean_text, re.IGNORECASE):
             role_level = lvl
             break
 
+    primary_role = "Software Developer"
     role_keywords = [
         "fullstack",
         "full stack",
@@ -116,7 +127,6 @@ def parse_resume_text(text: str) -> Dict[str, Any]:
         "sre",
         "cloud engineer",
     ]
-    primary_role = "Software Developer"
     for kw in role_keywords:
         if kw in clean_text:
             if kw == "sysops":
@@ -128,34 +138,24 @@ def parse_resume_text(text: str) -> Dict[str, Any]:
             break
 
     # ---- Skills ----
-    def collect(pattern: str) -> List[str]:
-        rgx = re.compile(pattern, re.IGNORECASE)
-        vals = [
-            rgx_match.group(0).lower().replace(".", "")
-            for rgx_match in rgx.finditer(clean_text)
-        ]
-        # unique & length > 1
-        uniq = []
-        for v in vals:
-            if v not in uniq and len(v) > 1:
-                uniq.append(v)
-        return uniq
+    skills_patterns: Dict[str, str] = {
+        "programming_languages": r"\b(typescript|javascript|js|python|java|go|rust|c\+\+|c#|php|ruby|swift|kotlin|scala|dart)\b",
+        "frameworks_and_libraries": r"\b(react\.?js?|next\.?js?|vue\.?js?|angular|svelte|django|flask|fastapi|spring|laravel|rails|tensorflow|pytorch|numpy|pandas|nuxt)\b",
+        "cloud_and_infra": r"\b(aws|amazon web services|azure|gcp|google cloud|docker|kubernetes|k8s|terraform|jenkins|github actions|gitlab ci|circleci)\b",
+        "databases": r"\b(postgresql|postgres|mysql|mariadb|mongodb|redis|dynamodb|firebase|supabase|prisma)\b",
+        "dev_tools": r"\b(git|github|gitlab|bitbucket|webpack|vite|npm|yarn|vercel|netlify|railway|jira)\b",
+    }
 
-    programming_languages = collect(
-        r"\b(typescript|javascript|js|python|java|go|rust|c\+\+|c#|php|ruby|swift|kotlin|scala|dart)\b"
-    )
-    frameworks_and_libraries = collect(
-        r"\b(react\.?js?|next\.?js?|vue\.?js?|angular|svelte|django|flask|fastapi|spring|laravel|rails|tensorflow|pytorch|numpy|pandas|nuxt)\b"
-    )
-    cloud_and_infra = collect(
-        r"\b(aws|amazon web services|azure|gcp|google cloud|docker|kubernetes|k8s|terraform|jenkins|github actions|gitlab ci|circleci)\b"
-    )
-    databases = collect(
-        r"\b(postgresql|postgres|mysql|mariadb|mongodb|redis|dynamodb|firebase|supabase|prisma)\b"
-    )
-    dev_tools = collect(
-        r"\b(git|github|gitlab|bitbucket|webpack|vite|npm|yarn|vercel|netlify|railway|jira)\b"
-    )
+    skills: Dict[str, List[str]] = {}
+    for key, pat in skills_patterns.items():
+        found = re.findall(pat, clean_text, re.IGNORECASE)
+        # Normalise and dedupe
+        norm = list(
+            dict.fromkeys(
+                [s.lower().replace(".", "") for s in found if len(s) > 1]
+            )
+        )
+        skills[key] = norm
 
     # ---- Summary ----
     section_keywords = [
@@ -172,26 +172,27 @@ def parse_resume_text(text: str) -> Dict[str, Any]:
         "education",
         "skills",
     ]
+
     summary = ""
-    summary_start_idx = -1
+    summary_start = -1
     for i, line in enumerate(lower_lines):
         if any(kw in line for kw in section_keywords):
-            summary_start_idx = i + 1
+            summary_start = i + 1
             break
 
-    if summary_start_idx != -1:
-        summary_end_idx = len(lower_lines)
-        for i in range(summary_start_idx, len(lower_lines)):
+    if summary_start != -1:
+        summary_end = len(lower_lines)
+        for i in range(summary_start, len(lower_lines)):
             if any(kw in lower_lines[i] for kw in end_section_keywords):
-                summary_end_idx = i
+                summary_end = i
                 break
-        summary = " ".join(raw_lines[summary_start_idx:summary_end_idx])
+        summary = " ".join(raw_lines[summary_start:summary_end])
     else:
-        # fallback: first few lines after name
         summary = " ".join(raw_lines[2:10])
+
     summary = summary[:600]
 
-    # ---- Experience (very simple heuristic) ----
+    # ---- Experience (simple heuristic) ----
     experience: List[Dict[str, Any]] = []
     exp_index = -1
     for i, line in enumerate(lower_lines):
@@ -201,24 +202,30 @@ def parse_resume_text(text: str) -> Dict[str, Any]:
 
     if exp_index != -1:
         exp_lines = raw_lines[exp_index + 1 :]
-        for i in range(0, len(exp_lines) - 2):
+        for i in range(len(exp_lines) - 2):
             role_line = exp_lines[i]
             company_line = exp_lines[i + 1]
             date_line = exp_lines[i + 2]
+
             if (
                 re.search(r"[A-Za-z]", role_line)
                 and re.search(r"[A-Za-z]", company_line)
                 and re.search(r"\d{4}", date_line)
             ):
-                years = re.findall(r"(19|20)\d{2}", date_line)
-                start_year = years[0] if years else ""
-                end_year = years[-1] if len(years) > 1 else "Present"
+                start_year_match = re.search(r"\b(19|20)\d{2}\b", date_line)
+                end_year_match = None
+                all_years = re.findall(r"\b(19|20)\d{2}\b", date_line)
+                if len(all_years) >= 2:
+                    end_year_match = all_years[-1]
+
                 experience.append(
                     {
-                        "job_title": role_line,
-                        "company": company_line,
-                        "start_date": start_year,
-                        "end_date": end_year,
+                        "job_title": role_line.strip(),
+                        "company": company_line.strip(),
+                        "start_date": start_year_match.group(0)
+                        if start_year_match
+                        else "",
+                        "end_date": end_year_match or "Present",
                         "responsibilities": [],
                         "job_title_confidence": 0.85,
                         "company_confidence": 0.8,
@@ -256,19 +263,20 @@ def parse_resume_text(text: str) -> Dict[str, Any]:
             )
             year_match = re.search(r"\b(19|20)\d{2}\b", line)
             if degree_match or year_match:
-                degree = (
+                degree_text = (
                     degree_match.group(0)
-                    .replace("  ", " ")
                     .strip()
+                    .replace("  ", " ")
+                ) if degree_match else "B.S. Computer Science"
+
+                # little cleanup to mimic earlier logic
+                degree_text = re.sub(
+                    r"\scs$", " Computer Science", degree_text, flags=re.IGNORECASE
                 )
-                degree = re.sub(
-                    r"\scs$", " Computer Science", degree, flags=re.IGNORECASE
-                )
-                if not degree:
-                    degree = "B.S. Computer Science"
+
                 education.append(
                     {
-                        "degree": degree,
+                        "degree": degree_text,
                         "institution": "University",
                         "year": year_match.group(0) if year_match else "",
                         "degree_confidence": 0.85,
@@ -289,36 +297,34 @@ def parse_resume_text(text: str) -> Dict[str, Any]:
 
     # ---- URLs ----
     github = ""
-    github_match = re.search(r"github\.com/[a-zA-Z0-9_-]+", clean_text)
-    if github_match:
-        github = "https://" + github_match.group(0)
+    m_github = re.search(r"github\.com/[a-zA-Z0-9_-]+", clean_text)
+    if m_github:
+        github = "https://" + m_github.group(0)
 
     portfolio = ""
-    portfolio_regex = re.compile(
-        r"https?://(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}"
-        r"\.[a-zA-Z0-9()]{2,6}\b(?!.*github\.com)[^\s]*"
+    # very loose URL matcher, excluding github
+    urls = re.findall(
+        r"https?://(?:www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{2,6}\b[^\s]*",
+        text,
     )
-    portfolio_match = portfolio_regex.search(clean_text)
-    if portfolio_match:
-        portfolio = portfolio_match.group(0)
+    for u in urls:
+        if "github.com" not in u:
+            portfolio = u
+            break
 
-    result: Dict[str, Any] = {
+    return {
         "name": name.strip(),
         "email": email,
         "phone": phone,
         "location": location,
         "role_level": role_level,
         "primary_role": primary_role,
-        "years_of_experience_total": total_years if total_years is not None else None,
+        "years_of_experience_total": total_years,
         "years_of_experience_in_tech": None,
         "github": github,
         "portfolio": portfolio,
         "summary": summary.strip(),
-        "programming_languages": programming_languages,
-        "frameworks_and_libraries": frameworks_and_libraries,
-        "cloud_and_infra": cloud_and_infra,
-        "databases": databases,
-        "dev_tools": dev_tools,
+        **skills,
         "experience": experience,
         "education": education,
         "name_confidence": 0.92 if name else 0.6,
@@ -326,16 +332,11 @@ def parse_resume_text(text: str) -> Dict[str, Any]:
         "phone_confidence": 0.88 if phone else 0.4,
         "location_confidence": 0.82 if location else 0.5,
         "summary_confidence": 0.85 if summary else 0.6,
-        "years_of_experience_total_confidence": 0.8 if total_years else 0.5,
-        "github_confidence": 0.9 if github else 0.4,
-        "portfolio_confidence": 0.9 if portfolio else 0.4,
         "raw": text[:1500] + ("..." if len(text) > 1500 else ""),
     }
 
-    return result
 
-
-# ------------ /parse endpoint -----------------
+# ------------------------- /parse ENDPOINT -----------------------------------
 
 
 @app.post("/parse")
@@ -360,7 +361,7 @@ async def parse_resume(file: UploadFile = File(...)):
     if not text.strip():
         raise HTTPException(
             status_code=400,
-            detail="No readable text extracted (possibly a scanned/image-only PDF).",
+            detail="No readable text extracted (maybe a scanned/image-only PDF?)",
         )
 
     parsed = parse_resume_text(text)

@@ -26,11 +26,15 @@ API_KEY = os.getenv("API_KEY")  # set this in Railway
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://resumify-working.vercel.app",
-    "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",  # optional preview
-    "https://resumify.co",         # future branded frontend
-    "https://www.resumify.co",
-    "https://api.resumifyapi.com",  # internal calls if needed
+    "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",
+    # old idea:
+    # "https://resumify.co",
+    # "https://www.resumify.co",
+    # new frontend domain:
+    "https://resumifyapi.com",
+    "https://www.resumifyapi.com",
 ]
+
 
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1 minute window
 RATE_LIMIT_MAX_REQUESTS = 60    # per IP per minute

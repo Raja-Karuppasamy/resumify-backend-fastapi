@@ -3,8 +3,7 @@ import re
 import time
 import logging
 import tempfile
-import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 
 from fastapi import (
     FastAPI,
@@ -22,20 +21,19 @@ from pdfminer.high_level import extract_text
 # Config
 # --------------------------------------------------------------------
 
-API_KEY = os.getenv("API_KEY")  # we'll set this in Railway
+API_KEY = os.getenv("API_KEY")  # set this in Railway
 
-# allow multiple origins via env later if needed
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://resumify-working.vercel.app",
     "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",  # optional preview
-    "https://resumify.co",            # if you later host frontend here
-    "https://www.resumify.co",        # "
-    "https://api.resumifyapi.com",    # for internal calls if needed
+    "https://resumify.co",         # future branded frontend
+    "https://www.resumify.co",
+    "https://api.resumifyapi.com",  # internal calls if needed
 ]
 
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1 minute window
-RATE_LIMIT_MAX_REQUESTS = 60    # per IP per minute (adjust as you like)
+RATE_LIMIT_MAX_REQUESTS = 60    # per IP per minute
 
 # simple in-memory store (good enough for single instance)
 _rate_limit_store: Dict[str, List[float]] = {}
@@ -144,6 +142,7 @@ async def secure_request(request: Request):
 def root():
     return {"status": "backend ok"}
 
+
 @app.get("/health")
 def health():
     return {
@@ -155,6 +154,59 @@ def health():
 # --------------------------------------------------------------------
 # Resume parsing helpers
 # --------------------------------------------------------------------
+
+YEAR_PATTERN = re.compile(r"(?:19|20)\d{2}")           # full year like 2017, 2020
+TWO_DIGIT_YEAR_PATTERN = re.compile(r"\b(\d{2})\b", re.IGNORECASE)
+
+SKILL_CATALOG = {
+    "programming_languages": {
+        "java": "Java",
+        "javascript": "JavaScript",
+        "js": "JavaScript",
+        "typescript": "TypeScript",
+        "python": "Python",
+        "c++": "C++",
+        "c#": "C#",
+        "go": "Go",
+        "ruby": "Ruby",
+    },
+    "frameworks_and_libraries": {
+        "react": "React.js",
+        "reactjs": "React.js",
+        "react.js": "React.js",
+        "next": "Next.js",
+        "next.js": "Next.js",
+        "angular": "Angular",
+        "vue": "Vue.js",
+        "django": "Django",
+        "flask": "Flask",
+        "spring": "Spring",
+    },
+    "cloud_and_infra": {
+        "aws": "AWS",
+        "azure": "Azure",
+        "gcp": "GCP",
+        "docker": "Docker",
+        "kubernetes": "Kubernetes",
+        "k8s": "Kubernetes",
+        "terraform": "Terraform",
+    },
+    "databases": {
+        "mysql": "MySQL",
+        "postgres": "PostgreSQL",
+        "postgresql": "PostgreSQL",
+        "mongodb": "MongoDB",
+        "redis": "Redis",
+    },
+    "dev_tools": {
+        "git": "Git",
+        "jira": "Jira",
+        "jenkins": "Jenkins",
+        "github": "GitHub",
+        "gitlab": "GitLab",
+    },
+}
+
 
 def extract_text_from_pdf_bytes(data: bytes) -> str:
     if not data:
@@ -175,304 +227,317 @@ def extract_text_from_pdf_bytes(data: bytes) -> str:
     return text
 
 
-# ---------- small utilities ----------
+# ---------- Experience helpers ----------
 
-YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
-DATE_RANGE_RE = re.compile(
-    r"\b(?P<start>(19|20)\d{2})\s*[-–]\s*(?P<end>(19|20)\d{2}|present|current)\b",
-    re.IGNORECASE,
-)
-
-
-def normalize_year_token(token: str) -> str | None:
+def _normalize_year_pair(start: Optional[str], end: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """
-    Fix truncated year tokens like '20' -> None (we'll ignore),
-    but keep 4-digit years as is.
+    Fix things like '2017 - 20' => '2017' / '2020', detect 'present/current'.
     """
-    token = token.strip()
-    if re.fullmatch(r"(19|20)\d{2}", token):
-        return token
-    return None
+    if not start and not end:
+        return None, None
+
+    if end:
+        end_lower = end.lower()
+        if "present" in end_lower or "current" in end_lower or "now" in end_lower:
+            end = "Present"
+
+    # If we have start=2017, end='20' -> use prefix from start
+    if start and end and len(end) == 2 and len(start) == 4 and start.startswith(("19", "20")):
+        end = start[:2] + end
+
+    return start, end
 
 
-def extract_first_email(text: str) -> str | None:
-    match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text)
-    return match.group(0) if match else None
-
-
-def extract_first_phone(text: str) -> str | None:
-    match = re.search(
-        r"(\+\d{1,3}[\s-]?)?(\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{4})", text
-    )
-    return match.group(0) if match else None
-
-
-# ---------- A: Experience parsing ----------
-
-def parse_experience_section(full_text: str) -> list[dict[str, Any]]:
+def _parse_date_range(text_block: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Heuristic experience parser:
-    - Find 'WORK EXPERIENCE' / 'EXPERIENCE' section
-    - Split into job blocks
-    - Extract job title, company, date range, and bullet responsibilities
+    Look for year ranges like '2017 - 2020', '2014–20', '2020 - Present', etc.
+    Works over a small block of text (job chunk).
     """
+    # All 4-digit years in the block
+    years = YEAR_PATTERN.findall(text_block)  # e.g. ['2017', '2020']
 
-    section_match = re.search(r"(?i)(work experience|experience)", full_text)
-    if not section_match:
-        return []
+    start: Optional[str] = None
+    end: Optional[str] = None
 
-    exp_text = full_text[section_match.end():].strip()
+    if years:
+        start = years[0]
 
-    # Stop at EDUCATION if present (so we don't eat that section)
-    edu_match = re.search(r"(?i)education", exp_text)
-    if edu_match:
-        exp_text = exp_text[:edu_match.start()].strip()
+        if len(years) > 1:
+            end = years[1]
+        else:
+            # Only one 4-digit year; try to infer end
+            two_digit = TWO_DIGIT_YEAR_PATTERN.findall(text_block)
+            if two_digit:
+                end = two_digit[-1]
+            elif re.search(r"present|current|now", text_block, re.IGNORECASE):
+                end = "Present"
 
-    # Split into chunks using double newlines
-    raw_blocks = re.split(r"\n{2,}", exp_text)
-    jobs: list[dict[str, Any]] = []
+        return _normalize_year_pair(start, end)
 
-    for block in raw_blocks:
-        lines = [l.strip() for l in block.splitlines() if l.strip()]
-        if len(" ".join(lines)) < 25:
+    # No 4-digit years, maybe 2-digit or just "present/current"
+    two_digit = TWO_DIGIT_YEAR_PATTERN.findall(text_block)
+    if two_digit:
+        start = None
+        end = two_digit[-1]
+        return _normalize_year_pair(start, end)
+
+    if re.search(r"present|current|now", text_block, re.IGNORECASE):
+        return None, "Present"
+
+    return None, None
+
+
+def _extract_responsibilities(lines: List[str]) -> List[str]:
+    """
+    Take the remaining lines of a job chunk and keep lines that look like bullets/sentences.
+    """
+    bullets: List[str] = []
+    for line in lines:
+        clean = line.strip("•- \t")
+        if len(clean) < 25:
+            continue
+        # skip headings
+        if re.search(r"experience|responsibilit|summary|education|skills", clean, re.IGNORECASE):
+            continue
+        bullets.append(clean)
+    return bullets[:8]  # cap to first 8 points
+
+
+def parse_experience_section(full_text: str) -> List[Dict[str, Any]]:
+    """
+    Structured experience parsing:
+    - Detect WORK EXPERIENCE section
+    - Split into role chunks
+    - Extract job_title, company, dates, responsibilities
+    """
+    experience_blocks: List[Dict[str, Any]] = []
+
+    parts = re.split(r"(?i)work experience|professional experience|experience", full_text, maxsplit=1)
+    if len(parts) < 2:
+        return experience_blocks
+
+    exp_text = parts[1]
+    job_chunks = re.split(r"\n{2,}", exp_text)
+
+    for chunk in job_chunks:
+        chunk = chunk.strip()
+        if len(chunk) < 30:
             continue
 
-        # 1. Title + company (first 1–2 lines)
-        title = lines[0]
-        company = lines[1] if len(lines) > 1 else None
+        lines = [l.strip() for l in chunk.splitlines() if l.strip()]
+        if not lines:
+            continue
 
-        # 2. Date range (search entire block)
-        start_year = None
-        end_year = None
-        for m in DATE_RANGE_RE.finditer(block):
-            start_year = m.group("start")
-            end_raw = m.group("end")
-            if re.fullmatch(r"(19|20)\d{2}", end_raw):
-                end_year = end_raw
-            else:
-                # “present/current”
-                end_year = "Present"
-            break  # first match is usually fine
+        # First line -> job title
+        job_title = lines[0]
 
-        # Fallback: single years
-        if not start_year:
-            years = YEAR_RE.findall(block)
-            if years:
-                start_year = years[0][0] + years[0][1:] if isinstance(years[0], tuple) else years[0]
+        # Next line -> likely company (if not a pure date line)
+        company: Optional[str] = None
+        if len(lines) > 1:
+            second = lines[1]
+            if not YEAR_PATTERN.search(second) and not re.search(r"\d", second):
+                company = second
 
-        # 3. Responsibilities = remaining lines that look like bullets/sentences
-        responsibilities: list[str] = []
-        for l in lines[2:]:
-            if len(l) < 20:
-                continue
-            responsibilities.append(l)
+        start_date, end_date = _parse_date_range(chunk)
+        responsibilities = _extract_responsibilities(lines[2:])
 
-        jobs.append(
+        experience_blocks.append(
             {
-                "job_title": title,
+                "job_title": job_title,
                 "company": company,
-                "start_date": start_year,
-                "end_date": end_year,
+                "start_date": start_date,
+                "end_date": end_date,
                 "responsibilities": responsibilities,
-                "job_title_confidence": 0.85 if title else 0.0,
+                "job_title_confidence": 0.85 if job_title else 0.0,
                 "company_confidence": 0.8 if company else 0.0,
             }
         )
 
-        if len(jobs) >= 5:
+        if len(experience_blocks) >= 5:
             break
 
-    return jobs
+    return experience_blocks
 
 
-# ---------- B: Education parsing ----------
+# ---------- Education helpers ----------
 
-def parse_education_section(full_text: str) -> list[dict[str, Any]]:
+def parse_education_section(full_text: str) -> List[Dict[str, Any]]:
     """
-    Find 'EDUCATION' section and extract simple degree / institution / year.
+    Detect degree + institution + year correctly.
     """
+    education: List[Dict[str, Any]] = []
 
-    match = re.search(r"(?i)education", full_text)
-    if not match:
-        return []
+    parts = re.split(r"(?i)education", full_text, maxsplit=1)
+    if len(parts) < 2:
+        return education
 
-    edu_text = full_text[match.end():].strip()
-
-    # Stop at SKILLS or EXPERIENCE if present
-    stop_match = re.search(r"(?i)(skills|experience|work experience)", edu_text)
-    if stop_match:
-        edu_text = edu_text[:stop_match.start()].strip()
-
+    edu_text = parts[1]
     blocks = re.split(r"\n{2,}", edu_text)
-    educations: list[dict[str, Any]] = []
 
     for block in blocks:
-        lines = [l.strip() for l in block.splitlines() if l.strip()]
-        if not lines:
+        block = block.strip()
+        if len(block) < 20:
             continue
 
-        text_block = " ".join(lines)
-        # Degree heuristics
-        degree_match = re.search(
-            r"(Bachelor|Master|B\.?S\.?|B\.?Tech|B\.?E\.?|M\.?S\.?|M\.?Tech|BSc|MSc)[^,\n]*",
-            text_block,
-            re.IGNORECASE,
-        )
-        degree = degree_match.group(0).strip() if degree_match else lines[0]
+        lines = [l.strip() for l in block.splitlines() if l.strip()]
+        lower_block = block.lower()
 
-        # Institution: next line or something with 'University' / 'College'
-        institution = None
-        for l in lines[1:4]:
-            if re.search(r"(?i)(university|college|institute|school)", l):
+        # Degree
+        degree: Optional[str] = None
+        if re.search(r"bachelor|b\.s\.|b\.sc|bsc|b\.tech|btech|b\.e\.|be", lower_block):
+            degree_line = None
+            for l in lines:
+                if re.search(r"bachelor|b\.s\.|b\.sc|bsc|b\.tech|btech|b\.e\.|be", l, re.IGNORECASE):
+                    degree_line = l
+                    break
+            degree = degree_line or lines[0]
+
+        if not degree:
+            continue
+
+        # Institution: next line with letters
+        institution: Optional[str] = None
+        for l in lines[1:3]:
+            if re.search(r"[A-Za-z]", l):
                 institution = l
                 break
-        if not institution and len(lines) > 1:
-            institution = lines[1]
 
-        # Year: first 4-digit year in block
-        year_match = YEAR_RE.search(text_block)
-        year = year_match.group(0) if year_match else ""
+        # Prefer "University of X" if present
+        uni_of_match = re.search(r"(University of [A-Za-z ,]+)", block)
+        if uni_of_match:
+            institution = uni_of_match.group(1).strip()
 
-        educations.append(
+        # Year (simple: first 4-digit year)
+        year_val = ""
+        year_match = YEAR_PATTERN.search(block)
+        if year_match:
+            year_val = year_match.group(0)
+
+        education.append(
             {
                 "degree": degree,
                 "institution": institution,
-                "year": year,
+                "year": year_val,
                 "degree_confidence": 0.85 if degree else 0.0,
                 "institution_confidence": 0.8 if institution else 0.0,
             }
         )
 
-        if len(educations) >= 5:
+        if len(education) >= 3:
             break
 
-    return educations
+    return education
 
 
-# ---------- C: Skills parsing ----------
+# ---------- Skills helpers ----------
 
-def parse_skills_section(full_text: str) -> dict[str, list[str]]:
+def extract_skills(full_text: str) -> Dict[str, List[str]]:
     """
-    Parse SKILLS section and group into:
-    - programming_languages
-    - frameworks_and_libraries
-    - cloud_and_infra
-    - databases
-    - dev_tools
+    Keyword-based skill extraction using SKILL_CATALOG.
+    Returns properly cased, de-duplicated lists.
     """
-
-    match = re.search(r"(?i)skills", full_text)
-    if not match:
-        return {
-            "programming_languages": [],
-            "frameworks_and_libraries": [],
-            "cloud_and_infra": [],
-            "databases": [],
-            "dev_tools": [],
-        }
-
-    skills_text = full_text[match.end():].strip()
-
-    # Stop at EDUCATION / EXPERIENCE
-    stop_match = re.search(r"(?i)(education|experience|work experience)", skills_text)
-    if stop_match:
-        skills_text = skills_text[:stop_match.start()].strip()
-
-    tokens = re.split(r"[,\n•\-•;]+", skills_text)
-    skills = [t.strip().lower() for t in tokens if t.strip()]
-
-    langs_ref = {"java", "javascript", "js", "typescript", "python", "go", "c++", "c#", "php", "ruby"}
-    fw_ref = {"react", "react.js", "reactjs", "vue", "angular", "django", "flask", "next.js", "spring"}
-    cloud_ref = {"aws", "gcp", "azure", "docker", "kubernetes", "k8s", "terraform"}
-    db_ref = {"mysql", "postgres", "postgresql", "mongodb", "redis", "oracle", "sql server"}
-    tools_ref = {"git", "jira", "jenkins", "github", "gitlab", "figma"}
-
-    programming_languages: list[str] = []
-    frameworks_and_libraries: list[str] = []
-    cloud_and_infra: list[str] = []
-    databases: list[str] = []
-    dev_tools: list[str] = []
-
-    for s in skills:
-        s_clean = s.replace("react.js", "reactjs")
-        if s_clean in langs_ref:
-            programming_languages.append(s)
-        elif s_clean in fw_ref:
-            frameworks_and_libraries.append(s)
-        elif s_clean in cloud_ref:
-            cloud_and_infra.append(s)
-        elif s_clean in db_ref:
-            databases.append(s)
-        elif s_clean in tools_ref:
-            dev_tools.append(s)
-
-    return {
-        "programming_languages": programming_languages,
-        "frameworks_and_libraries": frameworks_and_libraries,
-        "cloud_and_infra": cloud_and_infra,
-        "databases": databases,
-        "dev_tools": dev_tools,
+    text_lower = full_text.lower()
+    result: Dict[str, List[str]] = {
+        "programming_languages": [],
+        "frameworks_and_libraries": [],
+        "cloud_and_infra": [],
+        "databases": [],
+        "dev_tools": [],
     }
 
+    for category, items in SKILL_CATALOG.items():
+        seen = set()
+        for raw, pretty in items.items():
+            if re.search(r"\b" + re.escape(raw) + r"\b", text_lower):
+                seen.add(pretty)
+        result[category] = sorted(seen)
 
-# ---------- Contact + summary + overall aggregator ----------
+    return result
+
+
+# ---------- Main parser ----------
 
 def parse_basic_fields(text: str) -> Dict[str, Any]:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     full_text = "\n".join(lines)
 
-    # Contact
+    # Name
     name = lines[0] if lines else None
-    email = extract_first_email(full_text)
-    phone = extract_first_phone(full_text)
 
-    # Location: first line in top 6 that has a comma and isn't email/phone
+    # Email
+    email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", full_text)
+    email = email_match.group(0) if email_match else None
+
+    # Phone
+    phone_match = re.search(
+        r"(\+\d{1,3}[\s-]?)?(\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{4})", full_text
+    )
+    phone = phone_match.group(0) if phone_match else None
+
+    # Location
     location = None
-    for l in lines[:6]:
-        if "," in l and email not in l and (not phone or phone not in l):
-            location = l
+    for line in lines[:10]:
+        if "," in line and "@" not in line:
+            location = line
             break
 
-    # Summary: line or short paragraph after contact block
+    # Summary
     summary = None
-    if len(lines) > 3:
-        summary_candidates = lines[2:8]
-        for cand in summary_candidates:
-            if len(cand.split()) >= 6:
-                summary = cand
-                break
+    for line in lines[3:15]:
+        if re.search(r"summary|objective|profile", line, re.IGNORECASE):
+            idx = lines.index(line)
+            if idx + 1 < len(lines):
+                summary = lines[idx + 1]
+            break
 
-    # A — Experience
-    experience = parse_experience_section(full_text)
+    # Experience / Education / Skills
+    experience_blocks = parse_experience_section(full_text)
+    education_blocks = parse_education_section(full_text)
+    skills = extract_skills(full_text)
 
-    # B — Education
-    education = parse_education_section(full_text)
+    # Role level / primary role
+    if re.search(r"\bsenior\b", full_text, re.IGNORECASE):
+        role_level = "Senior"
+    elif re.search(r"\bjunior\b|\bentry\b", full_text, re.IGNORECASE):
+        role_level = "Junior"
+    else:
+        role_level = "Mid-level"
 
-    # C — Skills
-    skills = parse_skills_section(full_text)
+    primary_role = None
+    if re.search(r"devops|sysops|system administrator|infrastructure", full_text, re.IGNORECASE):
+        primary_role = "Cloud / SysOps"
+    elif re.search(r"frontend|react|ui", full_text, re.IGNORECASE):
+        primary_role = "Frontend"
+    elif re.search(r"backend|api|microservices", full_text, re.IGNORECASE):
+        primary_role = "Backend"
 
-    return {
+    result: Dict[str, Any] = {
         "name": name,
         "email": email,
         "phone": phone,
         "location": location,
-        "role_level": None,          # we can infer later (AI layer)
-        "primary_role": None,        # later
-        "years_of_experience_total": None,
-        "years_of_experience_in_tech": None,
+        "role_level": role_level,
+        "primary_role": primary_role,
+        "years_of_experience_total": None,      # future improvement
+        "years_of_experience_in_tech": None,    # future improvement
         "github": "",
         "portfolio": "",
         "summary": summary,
-        "experience": experience,
-        "education": education,
-        **skills,
-        "name_confidence": 0.92 if name else 0.0,
-        "email_confidence": 0.98 if email else 0.0,
-        "phone_confidence": 0.88 if phone else 0.0,
-        "location_confidence": 0.82 if location else 0.0,
-        "summary_confidence": 0.85 if summary else 0.0,
+        "experience": experience_blocks,
+        "education": education_blocks,
         "raw": text,
+        "name_confidence": 0.9 if name else 0.0,
+        "email_confidence": 0.95 if email else 0.0,
+        "phone_confidence": 0.9 if phone else 0.0,
+        "location_confidence": 0.8 if location else 0.0,
+        "summary_confidence": 0.8 if summary else 0.0,
     }
+
+    # merge skills
+    result.update(skills)
+
+    return result
+
 
 # --------------------------------------------------------------------
 # /parse endpoint (protected)
@@ -495,6 +560,6 @@ async def parse_resume(
     except ValueError as ve:
         logger.exception("Parsing error: %s", ve)
         raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected parse error")
         raise HTTPException(status_code=500, detail="Internal parse error")

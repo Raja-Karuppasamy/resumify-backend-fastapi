@@ -29,10 +29,15 @@ ALLOWED_ORIGINS = [
     "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",
     "https://resumify.co",
     "https://www.resumify.co",
+
+    # ✅ your live frontend
+    "https://resumifyapi.com",
+    "https://www.resumifyapi.com",
+
+    # optional: internal calls
     "https://api.resumifyapi.com",
-    "https://resumifyapi.com",       # ✅ frontend prod
-    "https://www.resumifyapi.com",   # ✅ in case you ever use www
 ]
+
 
 
 

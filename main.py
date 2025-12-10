@@ -27,13 +27,13 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://resumify-working.vercel.app",
     "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",
-    # old idea:
-    # "https://resumify.co",
-    # "https://www.resumify.co",
-    # new frontend domain:
-    "https://resumifyapi.com",
-    "https://www.resumifyapi.com",
+    "https://resumify.co",
+    "https://www.resumify.co",
+    "https://api.resumifyapi.com",
+    "https://resumifyapi.com",       # ✅ frontend prod
+    "https://www.resumifyapi.com",   # ✅ in case you ever use www
 ]
+
 
 
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1 minute window
@@ -91,15 +91,33 @@ def verify_api_key(request: Request):
     If API_KEY is not set (dev), this becomes a no-op.
     """
     if not API_KEY:
+        # dev mode: no API key required
         return
 
     header_key = request.headers.get("x-api-key")
+
+    if not header_key:
+        logger.warning("Missing API key from %s", request.client.host)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing API key",
+        )
+
     if header_key != API_KEY:
         logger.warning("Invalid API key from %s", request.client.host)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing API key",
+            detail="Invalid API key",
         )
+
+
+    if header_key != API_KEY:
+        logger.warning("Invalid API key from %s", request.client.host)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API key",
+        )
+
 
 
 def check_rate_limit(request: Request):

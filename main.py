@@ -153,12 +153,13 @@ def check_rate_limit(request: Request):
 
 
 async def secure_request(request: Request):
-    """
-    Combined dependency: rate-limit + API key.
-    Attach this to protected routes like /parse.
-    """
+    # ✅ Allow CORS preflight through
+    if request.method == "OPTIONS":
+        return
+
     check_rate_limit(request)
     verify_api_key(request)
+
 
 
 # --------------------------------------------------------------------

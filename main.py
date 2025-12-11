@@ -1,3 +1,4 @@
+# main.py
 import os
 import re
 import time
@@ -21,25 +22,20 @@ from pdfminer.high_level import extract_text
 # Config
 # --------------------------------------------------------------------
 
-API_KEY = os.getenv("API_KEY")  # set this in Railway
+API_KEY = os.getenv("API_KEY")  # set this in Railway / Vercel (server-side)
 
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://resumify-working.vercel.app",
-    "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",
+    "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",  # optional preview
     "https://resumify.co",
     "https://www.resumify.co",
-
-    # ✅ your live frontend
+    # your live frontend
     "https://resumifyapi.com",
     "https://www.resumifyapi.com",
-
-    # optional: internal calls
+    # optional internal
     "https://api.resumifyapi.com",
 ]
-
-
-
 
 RATE_LIMIT_WINDOW_SECONDS = 60  # 1 minute window
 RATE_LIMIT_MAX_REQUESTS = 60    # per IP per minute
@@ -57,18 +53,14 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Resumify Backend API")
 
+# Use the ALLOWED_ORIGINS defined above (keeps middleware consistent)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "https://resumifyapi.com",
-        "https://www.resumifyapi.com",
-    ],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # --------------------------------------------------------------------
 # Middleware: request logging
@@ -121,15 +113,6 @@ def verify_api_key(request: Request):
         )
 
 
-    if header_key != API_KEY:
-        logger.warning("Invalid API key from %s", request.client.host)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
-
-
-
 def check_rate_limit(request: Request):
     """
     Very simple per-IP rate limiter (in-memory).
@@ -158,14 +141,111 @@ def check_rate_limit(request: Request):
 
 
 async def secure_request(request: Request):
-    # ✅ Allow CORS preflight through
+    """
+    Combined dependency: rate-limit + API key.
+    Allow preflight OPTIONS to pass early.
+    """
     if request.method == "OPTIONS":
         return
 
     check_rate_limit(request)
     verify_api_key(request)
 
+# --------------------------------------------------------------------
+# Simple usage tracking (in-memory) - suitable for single-instance MVP
+# --------------------------------------------------------------------
 
+# Plan config (for MVP)
+PLANS = {
+    "free": {"limit_per_minute": 60, "limit_per_month": 1000, "display_name": "Free (Beta)"},
+    "pro": {"limit_per_minute": 600, "limit_per_month": 100000, "display_name": "Pro"},
+}
+
+_usage_store: Dict[str, Dict[str, Any]] = {}
+
+def _ensure_key_record(api_key: str) -> None:
+    if api_key not in _usage_store:
+        _usage_store[api_key] = {
+            "minute_timestamps": [],
+            "month_count": 0,
+            "plan": "free",
+            "last_reset_month": time.localtime().tm_mon,
+        }
+
+def _maybe_reset_month(api_key: str):
+    rec = _usage_store[api_key]
+    current_month = time.localtime().tm_mon
+    if rec.get("last_reset_month") != current_month:
+        rec["month_count"] = 0
+        rec["last_reset_month"] = current_month
+
+def increment_usage(api_key: str, amount: int = 1) -> Tuple[int, int]:
+    _ensure_key_record(api_key)
+    _maybe_reset_month(api_key)
+
+    now = time.time()
+    rec = _usage_store[api_key]
+
+    window_start = now - 60
+    rec["minute_timestamps"] = [ts for ts in rec["minute_timestamps"] if ts >= window_start]
+
+    for _ in range(amount):
+        rec["minute_timestamps"].append(now)
+
+    rec["month_count"] += amount
+
+    minute_count = len(rec["minute_timestamps"])
+    month_count = rec["month_count"]
+    return minute_count, month_count
+
+def get_usage_for_key(api_key: str) -> Dict[str, Any]:
+    _ensure_key_record(api_key)
+    _maybe_reset_month(api_key)
+
+    rec = _usage_store[api_key]
+    minute_count = len([ts for ts in rec["minute_timestamps"] if ts >= time.time() - 60])
+    month_count = rec["month_count"]
+    plan = rec.get("plan", "free")
+    plan_info = PLANS.get(plan, PLANS["free"])
+    remaining_minute = max(plan_info["limit_per_minute"] - minute_count, 0)
+    remaining_month = max(plan_info["limit_per_month"] - month_count, 0)
+    return {
+        "api_key": api_key,
+        "plan": plan,
+        "plan_display_name": plan_info["display_name"],
+        "limit_per_minute": plan_info["limit_per_minute"],
+        "limit_per_month": plan_info["limit_per_month"],
+        "used_minute": minute_count,
+        "used_month": month_count,
+        "remaining_minute": remaining_minute,
+        "remaining_month": remaining_month,
+    }
+
+def set_plan_for_key(api_key: str, plan: str):
+    _ensure_key_record(api_key)
+    if plan not in PLANS:
+        raise ValueError("plan unknown")
+    _usage_store[api_key]["plan"] = plan
+
+# Admin / public usage routes
+from fastapi import Query
+
+@app.get("/usage")
+def usage_admin(request: Request, _ = Depends(verify_api_key)):
+    return {"usage": _usage_store, "plans": PLANS}
+
+@app.get("/usage/public")
+def public_usage(request: Request):
+    header_key = request.headers.get("x-api-key") or "anonymous"
+    return get_usage_for_key(header_key)
+
+@app.post("/admin/usage/reset")
+def admin_reset_usage(request: Request, key: str = Query(...), _ = Depends(verify_api_key)):
+    if key in _usage_store:
+        _usage_store[key]["minute_timestamps"] = []
+        _usage_store[key]["month_count"] = 0
+        return {"ok": True}
+    return {"ok": False, "msg": "no such key"}
 
 # --------------------------------------------------------------------
 # Health + root
@@ -174,7 +254,6 @@ async def secure_request(request: Request):
 @app.get("/")
 def root():
     return {"status": "backend ok"}
-
 
 @app.get("/health")
 def health():
@@ -185,10 +264,10 @@ def health():
     }
 
 # --------------------------------------------------------------------
-# Resume parsing helpers
+# Parser helpers (experience/education/skills extraction)
 # --------------------------------------------------------------------
 
-YEAR_PATTERN = re.compile(r"(?:19|20)\d{2}")           # full year like 2017, 2020
+YEAR_PATTERN = re.compile(r"(?:19|20)\d{2}")
 TWO_DIGIT_YEAR_PATTERN = re.compile(r"\b(\d{2})\b", re.IGNORECASE)
 
 SKILL_CATALOG = {
@@ -240,7 +319,6 @@ SKILL_CATALOG = {
     },
 }
 
-
 def extract_text_from_pdf_bytes(data: bytes) -> str:
     if not data:
         raise ValueError("Empty file")
@@ -252,20 +330,19 @@ def extract_text_from_pdf_bytes(data: bytes) -> str:
     try:
         text = extract_text(tmp_path) or ""
     finally:
-        os.remove(tmp_path)
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
 
     if not text.strip():
         raise ValueError("No readable text extracted")
 
     return text
 
-
-# ---------- Experience helpers ----------
+# Experience helpers
 
 def _normalize_year_pair(start: Optional[str], end: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Fix things like '2017 - 20' => '2017' / '2020', detect 'present/current'.
-    """
     if not start and not end:
         return None, None
 
@@ -274,40 +351,28 @@ def _normalize_year_pair(start: Optional[str], end: Optional[str]) -> Tuple[Opti
         if "present" in end_lower or "current" in end_lower or "now" in end_lower:
             end = "Present"
 
-    # If we have start=2017, end='20' -> use prefix from start
     if start and end and len(end) == 2 and len(start) == 4 and start.startswith(("19", "20")):
         end = start[:2] + end
 
     return start, end
 
-
 def _parse_date_range(text_block: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Look for year ranges like '2017 - 2020', '2014–20', '2020 - Present', etc.
-    Works over a small block of text (job chunk).
-    """
-    # All 4-digit years in the block
-    years = YEAR_PATTERN.findall(text_block)  # e.g. ['2017', '2020']
-
+    years = YEAR_PATTERN.findall(text_block)
     start: Optional[str] = None
     end: Optional[str] = None
 
     if years:
         start = years[0]
-
         if len(years) > 1:
             end = years[1]
         else:
-            # Only one 4-digit year; try to infer end
             two_digit = TWO_DIGIT_YEAR_PATTERN.findall(text_block)
             if two_digit:
                 end = two_digit[-1]
             elif re.search(r"present|current|now", text_block, re.IGNORECASE):
                 end = "Present"
-
         return _normalize_year_pair(start, end)
 
-    # No 4-digit years, maybe 2-digit or just "present/current"
     two_digit = TWO_DIGIT_YEAR_PATTERN.findall(text_block)
     if two_digit:
         start = None
@@ -319,32 +384,19 @@ def _parse_date_range(text_block: str) -> Tuple[Optional[str], Optional[str]]:
 
     return None, None
 
-
 def _extract_responsibilities(lines: List[str]) -> List[str]:
-    """
-    Take the remaining lines of a job chunk and keep lines that look like bullets/sentences.
-    """
     bullets: List[str] = []
     for line in lines:
         clean = line.strip("•- \t")
         if len(clean) < 25:
             continue
-        # skip headings
         if re.search(r"experience|responsibilit|summary|education|skills", clean, re.IGNORECASE):
             continue
         bullets.append(clean)
-    return bullets[:8]  # cap to first 8 points
-
+    return bullets[:8]
 
 def parse_experience_section(full_text: str) -> List[Dict[str, Any]]:
-    """
-    Structured experience parsing:
-    - Detect WORK EXPERIENCE section
-    - Split into role chunks
-    - Extract job_title, company, dates, responsibilities
-    """
     experience_blocks: List[Dict[str, Any]] = []
-
     parts = re.split(r"(?i)work experience|professional experience|experience", full_text, maxsplit=1)
     if len(parts) < 2:
         return experience_blocks
@@ -361,10 +413,8 @@ def parse_experience_section(full_text: str) -> List[Dict[str, Any]]:
         if not lines:
             continue
 
-        # First line -> job title
         job_title = lines[0]
 
-        # Next line -> likely company (if not a pure date line)
         company: Optional[str] = None
         if len(lines) > 1:
             second = lines[1]
@@ -391,15 +441,10 @@ def parse_experience_section(full_text: str) -> List[Dict[str, Any]]:
 
     return experience_blocks
 
-
-# ---------- Education helpers ----------
+# Education helpers
 
 def parse_education_section(full_text: str) -> List[Dict[str, Any]]:
-    """
-    Detect degree + institution + year correctly.
-    """
     education: List[Dict[str, Any]] = []
-
     parts = re.split(r"(?i)education", full_text, maxsplit=1)
     if len(parts) < 2:
         return education
@@ -415,7 +460,6 @@ def parse_education_section(full_text: str) -> List[Dict[str, Any]]:
         lines = [l.strip() for l in block.splitlines() if l.strip()]
         lower_block = block.lower()
 
-        # Degree
         degree: Optional[str] = None
         if re.search(r"bachelor|b\.s\.|b\.sc|bsc|b\.tech|btech|b\.e\.|be", lower_block):
             degree_line = None
@@ -428,19 +472,16 @@ def parse_education_section(full_text: str) -> List[Dict[str, Any]]:
         if not degree:
             continue
 
-        # Institution: next line with letters
         institution: Optional[str] = None
         for l in lines[1:3]:
             if re.search(r"[A-Za-z]", l):
                 institution = l
                 break
 
-        # Prefer "University of X" if present
         uni_of_match = re.search(r"(University of [A-Za-z ,]+)", block)
         if uni_of_match:
             institution = uni_of_match.group(1).strip()
 
-        # Year (simple: first 4-digit year)
         year_val = ""
         year_match = YEAR_PATTERN.search(block)
         if year_match:
@@ -461,14 +502,9 @@ def parse_education_section(full_text: str) -> List[Dict[str, Any]]:
 
     return education
 
-
-# ---------- Skills helpers ----------
+# Skills helpers
 
 def extract_skills(full_text: str) -> Dict[str, List[str]]:
-    """
-    Keyword-based skill extraction using SKILL_CATALOG.
-    Returns properly cased, de-duplicated lists.
-    """
     text_lower = full_text.lower()
     result: Dict[str, List[str]] = {
         "programming_languages": [],
@@ -487,34 +523,28 @@ def extract_skills(full_text: str) -> Dict[str, List[str]]:
 
     return result
 
-
-# ---------- Main parser ----------
+# Main parsing
 
 def parse_basic_fields(text: str) -> Dict[str, Any]:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     full_text = "\n".join(lines)
 
-    # Name
     name = lines[0] if lines else None
 
-    # Email
     email_match = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", full_text)
     email = email_match.group(0) if email_match else None
 
-    # Phone
     phone_match = re.search(
         r"(\+\d{1,3}[\s-]?)?(\(?\d{3}\)?[\s-]?\d{3}[\s-]?\d{4})", full_text
     )
     phone = phone_match.group(0) if phone_match else None
 
-    # Location
     location = None
     for line in lines[:10]:
         if "," in line and "@" not in line:
             location = line
             break
 
-    # Summary
     summary = None
     for line in lines[3:15]:
         if re.search(r"summary|objective|profile", line, re.IGNORECASE):
@@ -523,12 +553,10 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
                 summary = lines[idx + 1]
             break
 
-    # Experience / Education / Skills
     experience_blocks = parse_experience_section(full_text)
     education_blocks = parse_education_section(full_text)
     skills = extract_skills(full_text)
 
-    # Role level / primary role
     if re.search(r"\bsenior\b", full_text, re.IGNORECASE):
         role_level = "Senior"
     elif re.search(r"\bjunior\b|\bentry\b", full_text, re.IGNORECASE):
@@ -551,8 +579,8 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
         "location": location,
         "role_level": role_level,
         "primary_role": primary_role,
-        "years_of_experience_total": None,      # future improvement
-        "years_of_experience_in_tech": None,    # future improvement
+        "years_of_experience_total": None,
+        "years_of_experience_in_tech": None,
         "github": "",
         "portfolio": "",
         "summary": summary,
@@ -566,15 +594,11 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
         "summary_confidence": 0.8 if summary else 0.0,
     }
 
-    # merge skills
     result.update(skills)
 
     return result
 
-
-# --------------------------------------------------------------------
-# /parse endpoint (protected)
-# --------------------------------------------------------------------
+# /parse endpoint
 
 @app.post("/parse")
 async def parse_resume(
@@ -589,6 +613,18 @@ async def parse_resume(
     try:
         text = extract_text_from_pdf_bytes(contents)
         parsed = parse_basic_fields(text)
+
+        # increment usage for the caller key (or 'anonymous')
+        header_key = request.headers.get("x-api-key") or "anonymous"
+        minute_count, month_count = increment_usage(header_key)
+
+        # attach small usage info for client debugging (can be removed later)
+        parsed["_usage"] = {
+            "used_minute": minute_count,
+            "used_month": month_count,
+            "plan": _usage_store.get(header_key, {}).get("plan", "free"),
+        }
+
         return parsed
     except ValueError as ve:
         logger.exception("Parsing error: %s", ve)

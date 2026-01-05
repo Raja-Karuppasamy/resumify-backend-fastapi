@@ -14,6 +14,8 @@ from fastapi import (
     Depends,
     Request,
     status,
+    Response,
+    Query,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from pdfminer.high_level import extract_text
@@ -22,18 +24,16 @@ from pdfminer.high_level import extract_text
 # Config
 # --------------------------------------------------------------------
 
-API_KEY = os.getenv("API_KEY")  # set this in Railway / Vercel (server-side)
+API_KEY = os.getenv("API_KEY")  # set this in Railway (private)
 
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://resumify-working.vercel.app",
-    "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",  # optional preview
+    "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",
     "https://resumify.co",
     "https://www.resumify.co",
-    # your live frontend
     "https://resumifyapi.com",
     "https://www.resumifyapi.com",
-    # optional internal
     "https://api.resumifyapi.com",
 ]
 
@@ -87,6 +87,18 @@ async def log_requests(request: Request, call_next):
 # Dependencies: API key + rate limit
 # --------------------------------------------------------------------
 
+def _client_ip_from_request(request: Request) -> str:
+    """
+    Prefer X-Forwarded-For (first value) if present, otherwise request.client.host.
+    """
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # take the first IP in the list
+        return xff.split(",")[0].strip()
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
 def verify_api_key(request: Request):
     """
     If API_KEY is set in env, require it via x-api-key header.
@@ -99,14 +111,14 @@ def verify_api_key(request: Request):
     header_key = request.headers.get("x-api-key")
 
     if not header_key:
-        logger.warning("Missing API key from %s", request.client.host)
+        logger.warning("Missing API key from %s", _client_ip_from_request(request))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing API key",
         )
 
     if header_key != API_KEY:
-        logger.warning("Invalid API key from %s", request.client.host)
+        logger.warning("Invalid API key from %s", _client_ip_from_request(request))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",
@@ -121,7 +133,7 @@ def check_rate_limit(request: Request):
     if RATE_LIMIT_MAX_REQUESTS <= 0:
         return
 
-    ip = request.client.host
+    ip = _client_ip_from_request(request)
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW_SECONDS
 
@@ -228,7 +240,6 @@ def set_plan_for_key(api_key: str, plan: str):
     _usage_store[api_key]["plan"] = plan
 
 # Admin / public usage routes
-from fastapi import Query
 
 @app.get("/usage")
 def usage_admin(request: Request, _ = Depends(verify_api_key)):
@@ -262,6 +273,12 @@ def health():
         "uptime_ms": int(time.time() * 1000),
         "version": "v1",
     }
+from fastapi.responses import Response
+
+@app.options("/parse")
+def parse_options():
+    return Response(status_code=200)
+
 
 # --------------------------------------------------------------------
 # Parser helpers (experience/education/skills extraction)
@@ -604,6 +621,7 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 async def parse_resume(
     request: Request,
     file: UploadFile = File(...),
+    response: Response = None,
     _secure: None = Depends(secure_request),
 ):
     if file.content_type != "application/pdf":
@@ -625,6 +643,15 @@ async def parse_resume(
             "plan": _usage_store.get(header_key, {}).get("plan", "free"),
         }
 
+        # add rate limit headers (helpful for frontend dashboards)
+        if response is not None:
+            plan_name = _usage_store.get(header_key, {}).get("plan", "free")
+            plan_info = PLANS.get(plan_name, PLANS["free"])
+            remaining_min = max(plan_info["limit_per_minute"] - minute_count, 0)
+            response.headers["X-RateLimit-Limit-Minute"] = str(plan_info["limit_per_minute"])
+            response.headers["X-RateLimit-Remaining-Minute"] = str(remaining_min)
+            response.headers["X-RateLimit-Used-Minute"] = str(minute_count)
+
         return parsed
     except ValueError as ve:
         logger.exception("Parsing error: %s", ve)
@@ -632,3 +659,8 @@ async def parse_resume(
     except Exception:
         logger.exception("Unexpected parse error")
         raise HTTPException(status_code=500, detail="Internal parse error")
+
+# optional: run locally
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8080)), log_level="info")

@@ -275,6 +275,10 @@ def health():
     }
 from fastapi.responses import Response
 
+@app.api_route("/parse", methods=["OPTIONS"])
+def parse_options():
+    return Response(status_code=200)
+
 @app.options("/parse")
 def parse_options():
     return Response(status_code=200)

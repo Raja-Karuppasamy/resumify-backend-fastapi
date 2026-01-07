@@ -48,53 +48,23 @@ _rate_limit_store: Dict[str, List[float]] = {}
 logger = logging.getLogger("resumify-backend")
 logging.basicConfig(level=logging.INFO)
 
-# --------------------------------------------------------------------
-# App + CORS
-# --------------------------------------------------------------------
-
-# --------------------------------------------------------------------
-# App + Middleware (ORDER MATTERS)
-# --------------------------------------------------------------------
-
 app = FastAPI(title="Resumify Backend API")
 
-# 1. Add Logging Middleware first (so it is "inner" relative to CORS)
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    # Skip logging for OPTIONS requests to avoid clutter and potential issues
-    if request.method == "OPTIONS":
-        return await call_next(request)
-
-    start = time.time()
-    path = request.url.path
-    response = None
-    try:
-        response = await call_next(request)
-        return response
-    finally:
-        duration = (time.time() - start) * 1000
-        status_code = response.status_code if response else 500
-        logger.info(
-            f"{request.client.host} {request.method} {path} -> {status_code} "
-            f"({duration:.1f} ms)"
-        )
-
-# 2. Add CORS Middleware LAST (so it wraps everything and runs FIRST)
-# In main.py, replace your current middleware block with this:
-
+# ---------------------------------------------------------
+# 1️⃣ CORS Middleware (MUST be added first)
+# ---------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://resumifyapi.com",
         "https://www.resumifyapi.com",
         "https://api.resumifyapi.com",
-        "http://localhost:3000",
         "https://resumify-working.vercel.app",
+        "http://localhost:3000",
     ],
-    allow_credentials=True,
+    allow_credentials=False,  # ✅ MUST be False (you are NOT using cookies)
     allow_methods=["*"],
     allow_headers=["*"],
-    # 👇 THIS IS THE MISSING PIECE
     expose_headers=[
         "X-RateLimit-Limit-Minute",
         "X-RateLimit-Remaining-Minute",
@@ -103,29 +73,25 @@ app.add_middleware(
     ],
 )
 
-
-
-# --------------------------------------------------------------------
-# Middleware: request logging
-# --------------------------------------------------------------------
-
+# ---------------------------------------------------------
+# 2️⃣ Single Logging Middleware (ONLY ONCE)
+# ---------------------------------------------------------
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    # Skip OPTIONS to avoid noise
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
     start = time.time()
-    path = request.url.path
+    response = await call_next(request)
+    duration = (time.time() - start) * 1000
 
-    response = None
-    try:
-        response = await call_next(request)
-        return response
-    finally:
-        duration = (time.time() - start) * 1000
-        status_code = response.status_code if response else 500
-        logger.info(
-            f"{request.client.host} {request.method} {path} -> {status_code} "
-            f"({duration:.1f} ms)"
-        )
+    logger.info(
+        f"{request.client.host} {request.method} {request.url.path} "
+        f"-> {response.status_code} ({duration:.1f} ms)"
+    )
 
+    return response
 # --------------------------------------------------------------------
 # Dependencies: API key + rate limit
 # --------------------------------------------------------------------

@@ -80,6 +80,8 @@ async def log_requests(request: Request, call_next):
         )
 
 # 2. Add CORS Middleware LAST (so it wraps everything and runs FIRST)
+# In main.py, replace your current middleware block with this:
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -92,11 +94,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 👇 THIS IS THE MISSING PIECE
     expose_headers=[
         "X-RateLimit-Limit-Minute",
         "X-RateLimit-Remaining-Minute",
         "X-RateLimit-Used-Minute",
-        "Content-Disposition"  # Good practice if you return files later
+        "Content-Disposition",
     ],
 )
 

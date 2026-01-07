@@ -52,12 +52,34 @@ logging.basicConfig(level=logging.INFO)
 # App + CORS
 # --------------------------------------------------------------------
 
+# --------------------------------------------------------------------
+# App + Middleware (ORDER MATTERS)
+# --------------------------------------------------------------------
+
 app = FastAPI(title="Resumify Backend API")
 
-# 1. Define Logger Middleware FIRST (so it's inner, or handled)
-# Actually, the best practice is to just add CORS last so it wraps everything.
+# 1. Add Logging Middleware first (so it is "inner" relative to CORS)
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    # Skip logging for OPTIONS requests to avoid clutter and potential issues
+    if request.method == "OPTIONS":
+        return await call_next(request)
 
-# Let's fix the CORS config specifically:
+    start = time.time()
+    path = request.url.path
+    response = None
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        duration = (time.time() - start) * 1000
+        status_code = response.status_code if response else 500
+        logger.info(
+            f"{request.client.host} {request.method} {path} -> {status_code} "
+            f"({duration:.1f} ms)"
+        )
+
+# 2. Add CORS Middleware LAST (so it wraps everything and runs FIRST)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -65,10 +87,11 @@ app.add_middleware(
         "https://www.resumifyapi.com",
         "https://api.resumifyapi.com",
         "http://localhost:3000",
+        "https://resumify-working.vercel.app",
     ],
-    allow_credentials=True,  # <--- CHANGE THIS TO TRUE
-    allow_methods=["*"],     # <--- Allow ALL methods (including OPTIONS)
-    allow_headers=["*"],     # <--- Allow ALL headers
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # --------------------------------------------------------------------

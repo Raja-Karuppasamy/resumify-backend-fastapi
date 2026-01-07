@@ -54,6 +54,10 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Resumify Backend API")
 
+# 1. Define Logger Middleware FIRST (so it's inner, or handled)
+# Actually, the best practice is to just add CORS last so it wraps everything.
+
+# Let's fix the CORS config specifically:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -62,13 +66,9 @@ app.add_middleware(
         "https://api.resumifyapi.com",
         "http://localhost:3000",
     ],
-    allow_credentials=False,   # 🔴 IMPORTANT
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=[
-        "Content-Type",
-        "X-API-Key",
-        "Authorization",
-    ],
+    allow_credentials=True,  # <--- CHANGE THIS TO TRUE
+    allow_methods=["*"],     # <--- Allow ALL methods (including OPTIONS)
+    allow_headers=["*"],     # <--- Allow ALL headers
 )
 
 # --------------------------------------------------------------------

@@ -279,11 +279,6 @@ from fastapi.responses import Response
 def parse_options():
     return Response(status_code=200)
 
-@app.options("/parse")
-def parse_options():
-    return Response(status_code=200)
-
-
 # --------------------------------------------------------------------
 # Parser helpers (experience/education/skills extraction)
 # --------------------------------------------------------------------
@@ -625,7 +620,7 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 async def parse_resume(
     request: Request,
     file: UploadFile = File(...),
-    response: Response = None,
+    response: Response,
     _secure: None = Depends(secure_request),
 ):
     if file.content_type != "application/pdf":

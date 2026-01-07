@@ -82,17 +82,12 @@ async def log_requests(request: Request, call_next):
 # 2. Add CORS Middleware LAST (so it wraps everything and runs FIRST)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://resumifyapi.com",
-        "https://www.resumifyapi.com",
-        "https://api.resumifyapi.com",
-        "http://localhost:3000",
-        "https://resumify-working.vercel.app",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"],  # Allow ALL origins
+    allow_credentials=True, # Allow credentials (cookies/auth headers)
+    allow_methods=["*"],  # Allow all methods
+    allow_headers=["*"],  # Allow all headers
 )
+
 
 # --------------------------------------------------------------------
 # Middleware: request logging

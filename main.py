@@ -51,24 +51,20 @@ logging.basicConfig(level=logging.INFO)
 # App + CORS
 # --------------------------------------------------------------------
 
-app = FastAPI(title="Resumify Backend API")
+from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://resumifyapi.com",
         "https://www.resumifyapi.com",
-        "https://api.resumifyapi.com",
         "http://localhost:3000",
     ],
-    allow_credentials=False,   # 🔴 IMPORTANT
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=[
-        "Content-Type",
-        "X-API-Key",
-        "Authorization",
-    ],
+    allow_credentials=False,  # ✅ correct
+    allow_methods=["*"],      # 🔑 important
+    allow_headers=["*"],      # 🔑 important
 )
+
 
 # --------------------------------------------------------------------
 # Middleware: request logging

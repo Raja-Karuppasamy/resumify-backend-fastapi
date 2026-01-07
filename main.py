@@ -4,6 +4,7 @@ import re
 import time
 import logging
 import tempfile
+import asyncio  # Added for non-blocking execution
 from typing import Dict, Any, List, Optional, Tuple
 
 from fastapi import (
@@ -51,20 +52,24 @@ logging.basicConfig(level=logging.INFO)
 # App + CORS
 # --------------------------------------------------------------------
 
-from fastapi.middleware.cors import CORSMiddleware
+app = FastAPI(title="Resumify Backend API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://resumifyapi.com",
         "https://www.resumifyapi.com",
+        "https://api.resumifyapi.com",
         "http://localhost:3000",
     ],
-    allow_credentials=False,  # ✅ correct
-    allow_methods=["*"],      # 🔑 important
-    allow_headers=["*"],      # 🔑 important
+    allow_credentials=False,   # 🔴 IMPORTANT
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "X-API-Key",
+        "Authorization",
+    ],
 )
-
 
 # --------------------------------------------------------------------
 # Middleware: request logging
@@ -277,7 +282,6 @@ def health():
         "uptime_ms": int(time.time() * 1000),
         "version": "v1",
     }
-from fastapi.responses import Response
 
 @app.api_route("/parse", methods=["OPTIONS"])
 def parse_options():
@@ -623,8 +627,8 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 @app.post("/parse")
 async def parse_resume(
     request: Request,
+    response: Response,  # Moved before arguments with defaults to fix SyntaxError
     file: UploadFile = File(...),
-    response: Response,
     _secure: None = Depends(secure_request),
 ):
     if file.content_type != "application/pdf":
@@ -632,7 +636,10 @@ async def parse_resume(
 
     contents = await file.read()
     try:
-        text = extract_text_from_pdf_bytes(contents)
+        # Run blocking PDF extraction in a thread pool
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, extract_text_from_pdf_bytes, contents)
+        
         parsed = parse_basic_fields(text)
 
         # increment usage for the caller key (or 'anonymous')

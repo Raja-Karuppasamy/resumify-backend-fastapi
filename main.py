@@ -53,13 +53,21 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Resumify Backend API")
 
-# Use the ALLOWED_ORIGINS defined above (keeps middleware consistent)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "https://resumifyapi.com",
+        "https://www.resumifyapi.com",
+        "https://api.resumifyapi.com",
+        "http://localhost:3000",
+    ],
+    allow_credentials=False,   # 🔴 IMPORTANT
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=[
+        "Content-Type",
+        "X-API-Key",
+        "Authorization",
+    ],
 )
 
 # --------------------------------------------------------------------

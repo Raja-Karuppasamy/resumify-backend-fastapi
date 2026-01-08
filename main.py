@@ -27,49 +27,35 @@ from pdfminer.high_level import extract_text
 
 API_KEY = os.getenv("API_KEY")  # set this in Railway (private)
 
-ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "https://resumify-working.vercel.app",
-    "https://resumify-working-git-main-raja-karuppasamys-projects.vercel.app",
-    "https://resumify.co",
-    "https://www.resumify.co",
-    "https://resumifyapi.com",
-    "https://www.resumifyapi.com",
-    "https://api.resumifyapi.com",
-]
-
-RATE_LIMIT_WINDOW_SECONDS = 60
-RATE_LIMIT_MAX_REQUESTS = 60
-
-_rate_limit_store: Dict[str, List[float]] = {}
-
-# logger
-logger = logging.getLogger("resumify-backend")
-logging.basicConfig(level=logging.INFO)
-
 app = FastAPI(title="Resumify Backend API")
 
-# ---------------------------------------------------------
-# 1️⃣ CORS Middleware (MUST be first middleware)
-# ---------------------------------------------------------
+# --------------------------------------------------------------------
+# CORS (MUST be global and before routes)
+# --------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,  # ✅ single source of truth
-    allow_credentials=False,        # ✅ REQUIRED for browser FormData
-    allow_methods=["POST", "OPTIONS"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization",
-        "X-API-Key",
+    allow_origins=[
+        "https://resumifyapi.com",
+        "https://www.resumifyapi.com",
+        "https://resumify-working.vercel.app",
+        "http://localhost:3000",
+    ],
+    allow_credentials=False,   # ❗ MUST be False
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=[
+        "Content-Disposition",
+        "X-RateLimit-Limit-Minute",
+        "X-RateLimit-Remaining-Minute",
+        "X-RateLimit-Used-Minute",
     ],
 )
 
-# ---------------------------------------------------------
-# 2️⃣ SINGLE Logging Middleware (ONLY ONCE)
-# ---------------------------------------------------------
+# --------------------------------------------------------------------
+# Request logging (ONLY ONCE)
+# --------------------------------------------------------------------
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    # Let CORS handle preflight cleanly
     if request.method == "OPTIONS":
         return await call_next(request)
 
@@ -81,8 +67,11 @@ async def log_requests(request: Request, call_next):
         f"{request.client.host} {request.method} {request.url.path} "
         f"-> {response.status_code} ({duration:.1f} ms)"
     )
-
     return response
+
+# --------------------------------------------------------------------
+# Explicit OPTIONS handler (CRITICAL)
+# --------------------------------------------------------------------
 @app.options("/parse")
 async def parse_preflight():
     return Response(status_code=204)

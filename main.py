@@ -228,11 +228,6 @@ def health():
         "uptime_ms": int(time.time() * 1000),
         "version": "v1",
     }
-
-@app.api_route("/parse", methods=["OPTIONS"])
-def parse_options():
-    return Response(status_code=200)
-
 # --------------------------------------------------------------------
 # Parser helpers (experience/education/skills extraction)
 # --------------------------------------------------------------------
@@ -571,26 +566,31 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 @app.post("/parse")
 async def parse_resume(
     request: Request,
-    response: Response,
     file: UploadFile = File(...),
+    _=Depends(secure_request),  # optional: add security if needed
 ):
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
 
     contents = await file.read()
 
-    loop = asyncio.get_running_loop()
-    text = await loop.run_in_executor(None, extract_text_from_pdf_bytes, contents)
+    try:
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, extract_text_from_pdf_bytes, contents)
 
-    parsed = parse_basic_fields(text)
+        parsed = parse_basic_fields(text)
 
-    return parsed
+        # Optional: increment usage if you use API keys
+        # api_key = request.headers.get("x-api-key")
+        # if api_key:
+        #     increment_usage(api_key)
+
+        return parsed
 
     except ValueError as ve:
         logger.exception("Parsing error")
         raise HTTPException(status_code=400, detail=str(ve))
-
-    except Exception:
+    except Exception as e:
         logger.exception("Unexpected parse error")
         raise HTTPException(status_code=500, detail="Internal parse error")
 

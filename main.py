@@ -1,52 +1,35 @@
-# main.py
-import os
-import re
+from fastapi import FastAPI, UploadFile, File, Request, Response, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 import time
 import logging
-import tempfile
 import asyncio
-from typing import Dict, Any, List, Optional, Tuple
+import os
 
-from fastapi import (
-    FastAPI,
-    UploadFile,
-    File,
-    HTTPException,
-    Depends,
-    Request,
-    status,
-    Response,
-    Query,
-)
-from fastapi.middleware.cors import CORSMiddleware
-from pdfminer.high_level import extract_text
-
-# --------------------------------------------------------------------
-# Config
-# --------------------------------------------------------------------
-
-API_KEY = os.getenv("API_KEY")  # set this in Railway (private)
+logger = logging.getLogger("resumify-backend")
+logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Resumify Backend API")
 
-# --------------------------------------------------------------------
-# CORS (MUST be global and before routes)
-# --------------------------------------------------------------------
+# ✅ SINGLE, CORRECT CORS CONFIG
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://resumifyapi.com",
         "https://www.resumifyapi.com",
+        "https://resumify-working.vercel.app",
+        "http://localhost:3000",
     ],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,   # ❗ REQUIRED (no cookies)
+    allow_methods=["*"],       # ❗ allow OPTIONS implicitly
+    allow_headers=["*"],       # ❗ allow X-API-Key
+    expose_headers=[
+        "X-RateLimit-Limit-Minute",
+        "X-RateLimit-Remaining-Minute",
+        "X-RateLimit-Used-Minute",
+    ],
 )
 
-
-# --------------------------------------------------------------------
-# Request logging (ONLY ONCE)
-# --------------------------------------------------------------------
+# logging (once)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     if request.method == "OPTIONS":
@@ -55,7 +38,6 @@ async def log_requests(request: Request, call_next):
     start = time.time()
     response = await call_next(request)
     duration = (time.time() - start) * 1000
-
     logger.info(
         f"{request.client.host} {request.method} {request.url.path} "
         f"-> {response.status_code} ({duration:.1f} ms)"
@@ -596,47 +578,20 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 @app.post("/parse")
 async def parse_resume(
     request: Request,
+    response: Response,
     file: UploadFile = File(...),
-    response: Response = None,  # keep LAST
 ):
-    # --- Content-type check (safe) ---
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
 
-    try:
-        contents = await file.read()
+    contents = await file.read()
 
-        # --- run blocking PDF extraction safely ---
-        loop = asyncio.get_running_loop()
-        text = await loop.run_in_executor(
-            None,
-            extract_text_from_pdf_bytes,
-            contents,
-        )
+    loop = asyncio.get_running_loop()
+    text = await loop.run_in_executor(None, extract_text_from_pdf_bytes, contents)
 
-        parsed = parse_basic_fields(text)
+    parsed = parse_basic_fields(text)
 
-        # --- usage tracking (DO NOT raise here) ---
-        header_key = request.headers.get("x-api-key") or "anonymous"
-        minute_count, month_count = increment_usage(header_key)
-
-        parsed["_usage"] = {
-            "used_minute": minute_count,
-            "used_month": month_count,
-            "plan": _usage_store.get(header_key, {}).get("plan", "free"),
-        }
-
-        # --- rate-limit headers (safe) ---
-        plan_name = _usage_store.get(header_key, {}).get("plan", "free")
-        plan_info = PLANS.get(plan_name, PLANS["free"])
-        remaining_min = max(plan_info["limit_per_minute"] - minute_count, 0)
-
-        response.headers["X-RateLimit-Limit-Minute"] = str(plan_info["limit_per_minute"])
-        response.headers["X-RateLimit-Remaining-Minute"] = str(remaining_min)
-        response.headers["X-RateLimit-Used-Minute"] = str(minute_count)
-
-        # ✅ RETURN DICT — FastAPI attaches CORS
-        return parsed
+    return parsed
 
     except ValueError as ve:
         logger.exception("Parsing error")

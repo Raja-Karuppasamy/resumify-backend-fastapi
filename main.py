@@ -10,25 +10,18 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Resumify Backend API")
 
-# ✅ SINGLE, CORRECT CORS CONFIG
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://resumifyapi.com",
         "https://www.resumifyapi.com",
-        "https://resumify-working.vercel.app",
         "http://localhost:3000",
+        "https://resumify-working.vercel.app",
     ],
-    allow_credentials=False,   # ❗ REQUIRED (no cookies)
-    allow_methods=["*"],       # ❗ allow OPTIONS implicitly
-    allow_headers=["*"],       # ❗ allow X-API-Key
-    expose_headers=[
-        "X-RateLimit-Limit-Minute",
-        "X-RateLimit-Remaining-Minute",
-        "X-RateLimit-Used-Minute",
-    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],  # THIS IS CRITICAL FOR X-API-Key
 )
-
 # logging (once)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

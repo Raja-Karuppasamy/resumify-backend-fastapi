@@ -37,19 +37,12 @@ app.add_middleware(
     allow_origins=[
         "https://resumifyapi.com",
         "https://www.resumifyapi.com",
-        "https://resumify-working.vercel.app",
-        "http://localhost:3000",
     ],
-    allow_credentials=False,   # ❗ MUST be False
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=[
-        "Content-Disposition",
-        "X-RateLimit-Limit-Minute",
-        "X-RateLimit-Remaining-Minute",
-        "X-RateLimit-Used-Minute",
-    ],
 )
+
 
 # --------------------------------------------------------------------
 # Request logging (ONLY ONCE)
@@ -69,12 +62,6 @@ async def log_requests(request: Request, call_next):
     )
     return response
 
-# --------------------------------------------------------------------
-# Explicit OPTIONS handler (CRITICAL)
-# --------------------------------------------------------------------
-@app.options("/parse")
-async def parse_preflight():
-    return Response(status_code=204)
 
 # --------------------------------------------------------------------
 # Dependencies: API key + rate limit
@@ -606,50 +593,55 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 
     return result
 
-# /parse endpoint
-
 @app.post("/parse")
 async def parse_resume(
     request: Request,
-    response: Response,  # Moved before arguments with defaults to fix SyntaxError
     file: UploadFile = File(...),
-    _secure: None = Depends(secure_request),
+    response: Response = None,  # keep LAST
 ):
+    # --- Content-type check (safe) ---
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
 
-    contents = await file.read()
     try:
-        # Run blocking PDF extraction in a thread pool
+        contents = await file.read()
+
+        # --- run blocking PDF extraction safely ---
         loop = asyncio.get_running_loop()
-        text = await loop.run_in_executor(None, extract_text_from_pdf_bytes, contents)
-        
+        text = await loop.run_in_executor(
+            None,
+            extract_text_from_pdf_bytes,
+            contents,
+        )
+
         parsed = parse_basic_fields(text)
 
-        # increment usage for the caller key (or 'anonymous')
+        # --- usage tracking (DO NOT raise here) ---
         header_key = request.headers.get("x-api-key") or "anonymous"
         minute_count, month_count = increment_usage(header_key)
 
-        # attach small usage info for client debugging (can be removed later)
         parsed["_usage"] = {
             "used_minute": minute_count,
             "used_month": month_count,
             "plan": _usage_store.get(header_key, {}).get("plan", "free"),
         }
 
-        # add rate limit headers (helpful for frontend dashboards)
-        if response is not None:
-            plan_name = _usage_store.get(header_key, {}).get("plan", "free")
-            plan_info = PLANS.get(plan_name, PLANS["free"])
-            remaining_min = max(plan_info["limit_per_minute"] - minute_count, 0)
-            response.headers["X-RateLimit-Limit-Minute"] = str(plan_info["limit_per_minute"])
-            response.headers["X-RateLimit-Remaining-Minute"] = str(remaining_min)
-            response.headers["X-RateLimit-Used-Minute"] = str(minute_count)
+        # --- rate-limit headers (safe) ---
+        plan_name = _usage_store.get(header_key, {}).get("plan", "free")
+        plan_info = PLANS.get(plan_name, PLANS["free"])
+        remaining_min = max(plan_info["limit_per_minute"] - minute_count, 0)
 
+        response.headers["X-RateLimit-Limit-Minute"] = str(plan_info["limit_per_minute"])
+        response.headers["X-RateLimit-Remaining-Minute"] = str(remaining_min)
+        response.headers["X-RateLimit-Used-Minute"] = str(minute_count)
+
+        # ✅ RETURN DICT — FastAPI attaches CORS
         return parsed
+
     except ValueError as ve:
-        logger.exception("Parsing error: %s", ve)
+        logger.exception("Parsing error")
         raise HTTPException(status_code=400, detail=str(ve))
+
     except Exception:
         logger.exception("Unexpected parse error")
         raise HTTPException(status_code=500, detail="Internal parse error")

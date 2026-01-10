@@ -1,20 +1,36 @@
-from fastapi import FastAPI, UploadFile, File, Request, Response, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Request, Response, HTTPException, Depends, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 import time
 import logging
 import asyncio
 import os
+import re
+import tempfile
+from typing import Dict, List, Tuple, Optional, Any
+from pdfminer.high_level import extract_text
 
 logger = logging.getLogger("resumify-backend")
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Resumify Backend API")
 
+# Environment variables with defaults
+API_KEY = os.getenv("API_KEY", "")  # Empty string = no auth required (dev mode)
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "100"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+
+# In-memory storage
+_rate_limit_store: Dict[str, List[float]] = {}
+_usage_store: Dict[str, Dict[str, Any]] = {}
+
+# CORS Configuration - Fixed to include HTTP version
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://resumifyapi.com",
         "https://www.resumifyapi.com",
+        "http://resumifyapi.com",       # Added HTTP
+        "http://www.resumifyapi.com",   # Added HTTP
         "http://localhost:3000",
         "https://resumify-working.vercel.app",
     ],
@@ -22,7 +38,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],  # THIS IS CRITICAL FOR X-API-Key
 )
-# logging (once)
+
+# Logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     if request.method == "OPTIONS":
@@ -128,8 +145,6 @@ PLANS = {
     "pro": {"limit_per_minute": 600, "limit_per_month": 100000, "display_name": "Pro"},
 }
 
-_usage_store: Dict[str, Dict[str, Any]] = {}
-
 def _ensure_key_record(api_key: str) -> None:
     if api_key not in _usage_store:
         _usage_store[api_key] = {
@@ -228,6 +243,7 @@ def health():
         "uptime_ms": int(time.time() * 1000),
         "version": "v1",
     }
+
 # --------------------------------------------------------------------
 # Parser helpers (experience/education/skills extraction)
 # --------------------------------------------------------------------
@@ -567,7 +583,7 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 async def parse_resume(
     request: Request,
     file: UploadFile = File(...),
-    _=Depends(secure_request),  # optional: add security if needed
+    _=Depends(secure_request),
 ):
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
@@ -581,9 +597,9 @@ async def parse_resume(
         parsed = parse_basic_fields(text)
 
         # Optional: increment usage if you use API keys
-        # api_key = request.headers.get("x-api-key")
-        # if api_key:
-        #     increment_usage(api_key)
+        api_key = request.headers.get("x-api-key")
+        if api_key:
+            increment_usage(api_key)
 
         return parsed
 
@@ -594,7 +610,7 @@ async def parse_resume(
         logger.exception("Unexpected parse error")
         raise HTTPException(status_code=500, detail="Internal parse error")
 
-# optional: run locally
+# Run locally
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8080)), log_level="info")

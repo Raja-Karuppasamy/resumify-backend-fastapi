@@ -9,6 +9,7 @@ import tempfile
 from typing import Dict, List, Tuple, Optional, Any
 from pdfminer.high_level import extract_text
 
+
 logger = logging.getLogger("resumify-backend")
 logging.basicConfig(level=logging.INFO)
 
@@ -20,10 +21,15 @@ async def parse_options():
     return Response(status_code=204)
 
 
-# Environment variables with defaults
-API_KEY = os.getenv("API_KEY", "")  # Empty string = no auth required (dev mode)
-RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "100"))
+# --------------------------------------------------------------------
+# Config
+# --------------------------------------------------------------------
+
+RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "5"))   # per minute
+MONTHLY_LIMIT = int(os.getenv("MONTHLY_LIMIT", "20"))                     # per month
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+
+API_KEY = os.getenv("API_KEY", "")  # reserved for future use
 
 # In-memory storage
 _rate_limit_store: Dict[str, List[float]] = {}

@@ -103,28 +103,29 @@ def verify_api_key(request: Request):
         )
 
 
-def check_rate_limit(request: Request):
-    """
-    Very simple per-IP rate limiter (in-memory).
-    Good enough for MVP on a single Railway instance.
-    """
-    if RATE_LIMIT_MAX_REQUESTS <= 0:
-        return
+def check_rate_limit(api_key: str):
+    _ensure_key_record(api_key)
+    _maybe_reset_month(api_key)
 
-    ip = _client_ip_from_request(request)
+    rec = _usage_store[api_key]
+
+    # minute window
     now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    window_start = now - 60
+    rec["minute_timestamps"] = [ts for ts in rec["minute_timestamps"] if ts >= window_start]
 
-    timestamps = _rate_limit_store.get(ip, [])
-    # keep only recent timestamps
-    timestamps = [t for t in timestamps if t >= window_start]
+    minute_count = len(rec["minute_timestamps"])
+    month_count = rec["month_count"]
 
-    if len(timestamps) >= RATE_LIMIT_MAX_REQUESTS:
-        logger.warning("Rate limit exceeded for IP %s", ip)
+    if minute_count >= RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded (per minute)")
+
+    if month_count >= MONTHLY_LIMIT:
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many requests. Please slow down.",
+            status_code=429,
+            detail="Free plan limit reached (monthly). Upgrade to continue."
         )
+
 
     timestamps.append(now)
     _rate_limit_store[ip] = timestamps
@@ -133,11 +134,6 @@ def check_rate_limit(request: Request):
 from fastapi import Request, HTTPException
 
 async def secure_request(request: Request):
-    """
-    Enforce API key + allow browser preflight safely.
-    """
-
-    # 🚨 NEVER block browser preflight
     if request.method == "OPTIONS":
         return None
 
@@ -148,10 +144,9 @@ async def secure_request(request: Request):
             detail="Missing API key. Get a free key to continue."
         )
 
-    # ✅ Apply rate limiting AFTER key is confirmed
     check_rate_limit(api_key)
-
     return api_key
+
 
 # --------------------------------------------------------------------
 # Simple usage tracking (in-memory) - suitable for single-instance MVP
@@ -601,7 +596,7 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 async def parse_resume(
     request: Request,
     file: UploadFile = File(...),
-    api_key: str = Depends(secure_request),  # 👈 IMPORTANT
+    api_key: str = Depends(secure_request),
 ):
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
@@ -614,8 +609,14 @@ async def parse_resume(
 
         parsed = parse_basic_fields(text)
 
-        # ✅ API key is guaranteed here
-        increment_usage(api_key)
+        # ✅ count only successful parses
+        minute_count, month_count = increment_usage(api_key)
+
+        # (optional) attach usage info
+        parsed["_usage"] = {
+            "minute_used": minute_count,
+            "month_used": month_count,
+        }
 
         return parsed
 

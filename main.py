@@ -16,18 +16,13 @@ logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="Resumify Backend API")
 from fastapi.responses import Response
 
-@app.options("/parse")
-async def parse_options():
-    return Response(status_code=204)
-
-
 # --------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------
 
-RATE_LIMIT_MAX_REQUESTS = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "5"))   # per minute
-MONTHLY_LIMIT = int(os.getenv("MONTHLY_LIMIT", "20"))                     # per month
-RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+RATE_LIMIT_MAX_REQUESTS = 5
+RATE_LIMIT_WINDOW_SECONDS = 60
+MONTHLY_LIMIT = 20
 
 API_KEY = os.getenv("API_KEY", "")  # reserved for future use
 
@@ -140,21 +135,16 @@ def check_rate_limit(api_key: str):
 from fastapi import Request, HTTPException
 
 async def secure_request(request: Request):
-    # 1️⃣ Always allow preflight
     if request.method == "OPTIONS":
         return None
 
-    # 2️⃣ Apply rate limit (IP-based or anonymous-safe)
-    check_rate_limit(request)
-
-    # 3️⃣ API key is OPTIONAL for now
     api_key = request.headers.get("x-api-key")
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing API key")
 
-    # Only verify if provided
-    if api_key:
-        verify_api_key(api_key)
-
+    check_rate_limit(api_key)
     return api_key
+
 
 
 # --------------------------------------------------------------------
@@ -615,26 +605,16 @@ async def parse_resume(
     try:
         loop = asyncio.get_running_loop()
         text = await loop.run_in_executor(None, extract_text_from_pdf_bytes, contents)
-
         parsed = parse_basic_fields(text)
 
-        # ✅ count only successful parses
-        minute_count, month_count = increment_usage(api_key)
-
-        # (optional) attach usage info
-        parsed["_usage"] = {
-            "minute_used": minute_count,
-            "month_used": month_count,
-        }
+        increment_usage(api_key)  # ONE place only
 
         return parsed
 
-    except ValueError as ve:
-        logger.exception("Parsing error")
-        raise HTTPException(status_code=400, detail=str(ve))
     except Exception:
-        logger.exception("Unexpected parse error")
+        logger.exception("Parse error")
         raise HTTPException(status_code=500, detail="Internal parse error")
+
 
 # Run locally
 if __name__ == "__main__":

@@ -140,17 +140,20 @@ def check_rate_limit(api_key: str):
 from fastapi import Request, HTTPException
 
 async def secure_request(request: Request):
+    # 1️⃣ Always allow preflight
     if request.method == "OPTIONS":
         return None
 
-    api_key = request.headers.get("x-api-key")
-    if not api_key:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing API key. Get a free key to continue."
-        )
+    # 2️⃣ Apply rate limit (IP-based or anonymous-safe)
+    check_rate_limit(request)
 
-    check_rate_limit(api_key)
+    # 3️⃣ API key is OPTIONAL for now
+    api_key = request.headers.get("x-api-key")
+
+    # Only verify if provided
+    if api_key:
+        verify_api_key(api_key)
+
     return api_key
 
 

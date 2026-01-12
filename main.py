@@ -13,6 +13,12 @@ logger = logging.getLogger("resumify-backend")
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Resumify Backend API")
+from fastapi.responses import Response
+
+@app.options("/parse")
+async def parse_options():
+    return Response(status_code=204)
+
 
 # Environment variables with defaults
 API_KEY = os.getenv("API_KEY", "")  # Empty string = no auth required (dev mode)

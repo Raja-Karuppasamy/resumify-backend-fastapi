@@ -1,11 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, Request, Response, HTTPException, Depends, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response as FastAPIResponse
 import time
 import logging
 import asyncio
 import os
 import re
 import tempfile
+import json
+import httpx
 from typing import Dict, List, Tuple, Optional, Any
 from pdfminer.high_level import extract_text
 
@@ -14,7 +17,6 @@ logger = logging.getLogger("resumify-backend")
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Resumify Backend API")
-from fastapi.responses import Response
 
 # --------------------------------------------------------------------
 # Config
@@ -24,27 +26,36 @@ RATE_LIMIT_MAX_REQUESTS = 5
 RATE_LIMIT_WINDOW_SECONDS = 60
 MONTHLY_LIMIT = 20
 
-API_KEY = os.getenv("API_KEY", "")  # reserved for future use
+API_KEY = os.getenv("API_KEY", "")  # Empty = no auth required
 
 # In-memory storage
 _rate_limit_store: Dict[str, List[float]] = {}
 _usage_store: Dict[str, Dict[str, Any]] = {}
 
-# CORS Configuration - Fixed to include HTTP version
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://resumifyapi.com",
         "https://www.resumifyapi.com",
-        "http://resumifyapi.com",       # Added HTTP
-        "http://www.resumifyapi.com",   # Added HTTP
+        "http://resumifyapi.com",
+        "http://www.resumifyapi.com",
         "http://localhost:3000",
         "https://resumify-working.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],  # THIS IS CRITICAL FOR X-API-Key
+    allow_headers=["*"],
 )
+
+# OPTIONS handlers for CORS preflight
+@app.options("/parse")
+async def parse_options():
+    return FastAPIResponse(status_code=204)
+
+@app.options("/parse/ai")
+async def parse_ai_options():
+    return FastAPIResponse(status_code=204)
 
 # Logging middleware
 @app.middleware("http")
@@ -63,63 +74,51 @@ async def log_requests(request: Request, call_next):
 
 
 # --------------------------------------------------------------------
-# Dependencies: API key + rate limit
+# Dependencies
 # --------------------------------------------------------------------
 
 def _client_ip_from_request(request: Request) -> str:
-    """
-    Prefer X-Forwarded-For (first value) if present, otherwise request.client.host.
-    """
     xff = request.headers.get("x-forwarded-for")
     if xff:
-        # take the first IP in the list
         return xff.split(",")[0].strip()
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
 
-def verify_api_key(request: Request):
-    """
-    If API_KEY is set in env, require it via x-api-key header.
-    If API_KEY is not set (dev), this becomes a no-op.
-    """
-    if not API_KEY:
-        # dev mode: no API key required
-        return
+def get_api_key_from_request(request: Request) -> str:
+    """Get API key from header or use IP as anonymous key"""
+    api_key = request.headers.get("x-api-key")
+    if not api_key:
+        # Use IP as anonymous key for free tier
+        api_key = f"anon_{_client_ip_from_request(request)}"
+    return api_key
 
-    header_key = request.headers.get("x-api-key")
-
-    if not header_key:
-        logger.warning("Missing API key from %s", _client_ip_from_request(request))
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing API key",
-        )
-
-    if header_key != API_KEY:
-        logger.warning("Invalid API key from %s", _client_ip_from_request(request))
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid API key",
-        )
-
+async def check_rate_limit_dependency(request: Request) -> str:
+    """Check rate limits and return API key"""
+    api_key = get_api_key_from_request(request)
+    check_rate_limit(api_key)
+    return api_key
 
 def check_rate_limit(api_key: str):
     _ensure_key_record(api_key)
     _maybe_reset_month(api_key)
 
     rec = _usage_store[api_key]
-
-    # minute window
     now = time.time()
-    window_start = now - 60
-    rec["minute_timestamps"] = [ts for ts in rec["minute_timestamps"] if ts >= window_start]
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+
+    rec["minute_timestamps"] = [
+        ts for ts in rec["minute_timestamps"] if ts >= window_start
+    ]
 
     minute_count = len(rec["minute_timestamps"])
     month_count = rec["month_count"]
 
     if minute_count >= RATE_LIMIT_MAX_REQUESTS:
-        raise HTTPException(status_code=429, detail="Rate limit exceeded (per minute)")
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded (per minute)"
+        )
 
     if month_count >= MONTHLY_LIMIT:
         raise HTTPException(
@@ -127,31 +126,14 @@ def check_rate_limit(api_key: str):
             detail="Free plan limit reached (monthly). Upgrade to continue."
         )
 
-
-    timestamps.append(now)
-    _rate_limit_store[ip] = timestamps
-
-
-from fastapi import Request, HTTPException
-
-async def secure_request(request: Request):
-    if request.method == "OPTIONS":
-        return None
-
-    api_key = request.headers.get("x-api-key")
-    if not api_key:
-        raise HTTPException(status_code=401, detail="Missing API key")
-
-    check_rate_limit(api_key)
-    return api_key
-
+    rec["minute_timestamps"].append(now)
+    rec["month_count"] += 1
 
 
 # --------------------------------------------------------------------
-# Simple usage tracking (in-memory) - suitable for single-instance MVP
+# Usage tracking
 # --------------------------------------------------------------------
 
-# Plan config (for MVP)
 PLANS = {
     "free": {"limit_per_minute": 60, "limit_per_month": 1000, "display_name": "Free (Beta)"},
     "pro": {"limit_per_minute": 600, "limit_per_month": 100000, "display_name": "Pro"},
@@ -215,38 +197,19 @@ def get_usage_for_key(api_key: str) -> Dict[str, Any]:
         "remaining_month": remaining_month,
     }
 
-def set_plan_for_key(api_key: str, plan: str):
-    _ensure_key_record(api_key)
-    if plan not in PLANS:
-        raise ValueError("plan unknown")
-    _usage_store[api_key]["plan"] = plan
-
-# Admin / public usage routes
-
-@app.get("/usage")
-def usage_admin(request: Request, _ = Depends(verify_api_key)):
-    return {"usage": _usage_store, "plans": PLANS}
-
+# Admin routes
 @app.get("/usage/public")
 def public_usage(request: Request):
-    header_key = request.headers.get("x-api-key") or "anonymous"
-    return get_usage_for_key(header_key)
-
-@app.post("/admin/usage/reset")
-def admin_reset_usage(request: Request, key: str = Query(...), _ = Depends(verify_api_key)):
-    if key in _usage_store:
-        _usage_store[key]["minute_timestamps"] = []
-        _usage_store[key]["month_count"] = 0
-        return {"ok": True}
-    return {"ok": False, "msg": "no such key"}
+    api_key = get_api_key_from_request(request)
+    return get_usage_for_key(api_key)
 
 # --------------------------------------------------------------------
-# Health + root
+# Health endpoints
 # --------------------------------------------------------------------
 
 @app.get("/")
 def root():
-    return {"status": "backend ok"}
+    return {"status": "backend ok", "version": "v1"}
 
 @app.get("/health")
 def health():
@@ -257,7 +220,7 @@ def health():
     }
 
 # --------------------------------------------------------------------
-# Parser helpers (experience/education/skills extraction)
+# Parser helpers
 # --------------------------------------------------------------------
 
 YEAR_PATTERN = re.compile(r"(?:19|20)\d{2}")
@@ -332,8 +295,6 @@ def extract_text_from_pdf_bytes(data: bytes) -> str:
         raise ValueError("No readable text extracted")
 
     return text
-
-# Experience helpers
 
 def _normalize_year_pair(start: Optional[str], end: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     if not start and not end:
@@ -434,8 +395,6 @@ def parse_experience_section(full_text: str) -> List[Dict[str, Any]]:
 
     return experience_blocks
 
-# Education helpers
-
 def parse_education_section(full_text: str) -> List[Dict[str, Any]]:
     education: List[Dict[str, Any]] = []
     parts = re.split(r"(?i)education", full_text, maxsplit=1)
@@ -495,8 +454,6 @@ def parse_education_section(full_text: str) -> List[Dict[str, Any]]:
 
     return education
 
-# Skills helpers
-
 def extract_skills(full_text: str) -> Dict[str, List[str]]:
     text_lower = full_text.lower()
     result: Dict[str, List[str]] = {
@@ -515,8 +472,6 @@ def extract_skills(full_text: str) -> Dict[str, List[str]]:
         result[category] = sorted(seen)
 
     return result
-
-# Main parsing
 
 def parse_basic_fields(text: str) -> Dict[str, Any]:
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -591,11 +546,15 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 
     return result
 
+# --------------------------------------------------------------------
+# Parse endpoints
+# --------------------------------------------------------------------
+
 @app.post("/parse")
 async def parse_resume(
     request: Request,
     file: UploadFile = File(...),
-    api_key: str = Depends(secure_request),
+    api_key: str = Depends(check_rate_limit_dependency),
 ):
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
@@ -607,12 +566,13 @@ async def parse_resume(
         text = await loop.run_in_executor(None, extract_text_from_pdf_bytes, contents)
         parsed = parse_basic_fields(text)
 
-        increment_usage(api_key)  # ONE place only
-
         return parsed
 
-    except Exception:
+    except ValueError as ve:
         logger.exception("Parse error")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.exception("Unexpected parse error")
         raise HTTPException(status_code=500, detail="Internal parse error")
 
 

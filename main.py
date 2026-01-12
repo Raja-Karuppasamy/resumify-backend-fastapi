@@ -130,16 +130,28 @@ def check_rate_limit(request: Request):
     _rate_limit_store[ip] = timestamps
 
 
+from fastapi import Request, HTTPException
+
 async def secure_request(request: Request):
     """
-    Combined dependency: rate-limit + API key.
-    Allow preflight OPTIONS to pass early.
+    Enforce API key + allow browser preflight safely.
     """
-    if request.method == "OPTIONS":
-        return
 
-    check_rate_limit(request)
-    verify_api_key(request)
+    # 🚨 NEVER block browser preflight
+    if request.method == "OPTIONS":
+        return None
+
+    api_key = request.headers.get("x-api-key")
+    if not api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing API key. Get a free key to continue."
+        )
+
+    # ✅ Apply rate limiting AFTER key is confirmed
+    check_rate_limit(api_key)
+
+    return api_key
 
 # --------------------------------------------------------------------
 # Simple usage tracking (in-memory) - suitable for single-instance MVP
@@ -589,7 +601,7 @@ def parse_basic_fields(text: str) -> Dict[str, Any]:
 async def parse_resume(
     request: Request,
     file: UploadFile = File(...),
-    _=Depends(secure_request),
+    api_key: str = Depends(secure_request),  # 👈 IMPORTANT
 ):
     if file.content_type != "application/pdf":
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
@@ -602,17 +614,15 @@ async def parse_resume(
 
         parsed = parse_basic_fields(text)
 
-        # Optional: increment usage if you use API keys
-        api_key = request.headers.get("x-api-key")
-        if api_key:
-            increment_usage(api_key)
+        # ✅ API key is guaranteed here
+        increment_usage(api_key)
 
         return parsed
 
     except ValueError as ve:
         logger.exception("Parsing error")
         raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
+    except Exception:
         logger.exception("Unexpected parse error")
         raise HTTPException(status_code=500, detail="Internal parse error")
 

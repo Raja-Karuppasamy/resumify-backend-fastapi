@@ -1,3 +1,5 @@
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI, UploadFile, File, Request, Response, HTTPException, Depends, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response as FastAPIResponse
@@ -218,7 +220,34 @@ def health():
         "uptime_ms": int(time.time() * 1000),
         "version": "v1",
     }
-
+@app.get("/rate-limit/check")
+def check_rate_limit_status(request: Request):
+    """
+    Check rate limit status for anonymous users
+    Returns remaining parses for current hour
+    """
+    api_key = get_api_key_from_request(request)
+    _ensure_key_record(api_key)
+    _maybe_reset_month(api_key)
+    
+    rec = _usage_store[api_key]
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    
+    # Clean old timestamps
+    rec["minute_timestamps"] = [
+        ts for ts in rec["minute_timestamps"] if ts >= window_start
+    ]
+    
+    minute_count = len(rec["minute_timestamps"])
+    remaining = max(RATE_LIMIT_MAX_REQUESTS - minute_count, 0)
+    
+    return {
+        "remaining": remaining,
+        "max": RATE_LIMIT_MAX_REQUESTS,
+        "window_seconds": RATE_LIMIT_WINDOW_SECONDS,
+        "is_rate_limited": minute_count >= RATE_LIMIT_MAX_REQUESTS
+    }
 # --------------------------------------------------------------------
 # Parser helpers
 # --------------------------------------------------------------------

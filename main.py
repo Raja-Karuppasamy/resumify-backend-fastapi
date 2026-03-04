@@ -13,7 +13,8 @@ import json
 import httpx
 from typing import Dict, List, Tuple, Optional, Any
 from pdfminer.high_level import extract_text
-
+from supabase_client import validate_api_key
+from rate_limiter import check_rate_limit
 
 logger = logging.getLogger("resumify-backend")
 logging.basicConfig(level=logging.INFO)
@@ -24,15 +25,10 @@ app = FastAPI(title="Resumify Backend API")
 # Config
 # --------------------------------------------------------------------
 
-RATE_LIMIT_MAX_REQUESTS = 5
-RATE_LIMIT_WINDOW_SECONDS = 60
-MONTHLY_LIMIT = 20
-
 API_KEY = os.getenv("API_KEY", "")  # Empty = no auth required
 
-# In-memory storage
+# In-memory storage (kept for backward compatibility if needed elsewhere)
 _rate_limit_store: Dict[str, List[float]] = {}
-_usage_store: Dict[str, Dict[str, Any]] = {}
 
 # CORS Configuration
 app.add_middleware(
@@ -98,40 +94,10 @@ def get_api_key_from_request(request: Request) -> str:
 async def check_rate_limit_dependency(request: Request) -> str:
     """Check rate limits and return API key"""
     api_key = get_api_key_from_request(request)
-    check_rate_limit(api_key)
+    check_rate_limit(api_key)  # Uses rate_limiter.py
     return api_key
 
-def check_rate_limit(api_key: str):
-    _ensure_key_record(api_key)
-    _maybe_reset_month(api_key)
-
-    rec = _usage_store[api_key]
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW_SECONDS
-
-    rec["minute_timestamps"] = [
-        ts for ts in rec["minute_timestamps"] if ts >= window_start
-    ]
-
-    minute_count = len(rec["minute_timestamps"])
-    month_count = rec["month_count"]
-
-    if minute_count >= RATE_LIMIT_MAX_REQUESTS:
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded (per minute)"
-        )
-
-    if month_count >= MONTHLY_LIMIT:
-        raise HTTPException(
-            status_code=429,
-            detail="Free plan limit reached (monthly). Upgrade to continue."
-        )
-
-    rec["minute_timestamps"].append(now)
-    rec["month_count"] += 1
-
-
+# Rate limiting now handled by rate_limiter.py
 # --------------------------------------------------------------------
 # Usage tracking
 # --------------------------------------------------------------------
@@ -141,21 +107,6 @@ PLANS = {
     "pro": {"limit_per_minute": 600, "limit_per_month": 100000, "display_name": "Pro"},
 }
 
-def _ensure_key_record(api_key: str) -> None:
-    if api_key not in _usage_store:
-        _usage_store[api_key] = {
-            "minute_timestamps": [],
-            "month_count": 0,
-            "plan": "free",
-            "last_reset_month": time.localtime().tm_mon,
-        }
-
-def _maybe_reset_month(api_key: str):
-    rec = _usage_store[api_key]
-    current_month = time.localtime().tm_mon
-    if rec.get("last_reset_month") != current_month:
-        rec["month_count"] = 0
-        rec["last_reset_month"] = current_month
 
 def increment_usage(api_key: str, amount: int = 1) -> Tuple[int, int]:
     _ensure_key_record(api_key)
@@ -223,30 +174,40 @@ def health():
 @app.get("/rate-limit/check")
 def check_rate_limit_status(request: Request):
     """
-    Check rate limit status for anonymous users
-    Returns remaining parses for current hour
+    Check rate limit status for authenticated or anonymous users
+    Returns remaining parses based on subscription tier
     """
+    from rate_limiter import get_user_tier, TIER_LIMITS, _usage_store
+    
     api_key = get_api_key_from_request(request)
-    _ensure_key_record(api_key)
-    _maybe_reset_month(api_key)
+    tier, profile = get_user_tier(api_key)
+    limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     
-    rec = _usage_store[api_key]
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW_SECONDS
+    # Get current usage from rate_limiter's store
+    if api_key in _usage_store:
+        rec = _usage_store[api_key]
+        hourly_count = len(rec.get("hourly_timestamps", []))
+        monthly_count = rec.get("monthly_count", 0)
+    else:
+        hourly_count = 0
+        monthly_count = 0
     
-    # Clean old timestamps
-    rec["minute_timestamps"] = [
-        ts for ts in rec["minute_timestamps"] if ts >= window_start
-    ]
-    
-    minute_count = len(rec["minute_timestamps"])
-    remaining = max(RATE_LIMIT_MAX_REQUESTS - minute_count, 0)
+    hourly_remaining = max(limits["hourly"] - hourly_count, 0)
+    monthly_remaining = max(limits["monthly"] - monthly_count, 0)
     
     return {
-        "remaining": remaining,
-        "max": RATE_LIMIT_MAX_REQUESTS,
-        "window_seconds": RATE_LIMIT_WINDOW_SECONDS,
-        "is_rate_limited": minute_count >= RATE_LIMIT_MAX_REQUESTS
+        "tier": tier,
+        "hourly": {
+            "used": hourly_count,
+            "limit": limits["hourly"],
+            "remaining": hourly_remaining
+        },
+        "monthly": {
+            "used": monthly_count,
+            "limit": limits["monthly"],
+            "remaining": monthly_remaining
+        },
+        "is_rate_limited": hourly_count >= limits["hourly"] or monthly_count >= limits["monthly"]
     }
 # --------------------------------------------------------------------
 # Parser helpers

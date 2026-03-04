@@ -2,4 +2,4 @@ fastapi
 uvicorn[standard]
 python-multipart
 pdfminer.six
-httpx
+httpxsupabase==2.28.0

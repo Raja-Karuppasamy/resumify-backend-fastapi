@@ -2,9 +2,9 @@ import time
 from fastapi import HTTPException
 from supabase_client import validate_api_key
 
-# Tier-based limits
+# Tier-based limits - FREE IS NOW DAILY
 TIER_LIMITS = {
-    "free": {"hourly": 5, "monthly": 20},
+    "free": {"daily": 5},
     "pro": {"hourly": 20, "monthly": 100},
     "enterprise": {"hourly": 50, "monthly": 500},
 }
@@ -35,6 +35,7 @@ def check_rate_limit(api_key: str):
     if api_key not in _usage_store:
         _usage_store[api_key] = {
             "hourly_timestamps": [],
+            "daily_timestamps": [],
             "monthly_count": 0,
             "month_start": time.time()
         }
@@ -47,26 +48,39 @@ def check_rate_limit(api_key: str):
         rec["monthly_count"] = 0
         rec["month_start"] = now
     
-    # Clean old hourly timestamps
+    # Clean old timestamps
     hour_ago = now - 3600
+    day_ago = now - 86400  # 24 hours
     rec["hourly_timestamps"] = [ts for ts in rec["hourly_timestamps"] if ts >= hour_ago]
+    rec["daily_timestamps"] = [ts for ts in rec["daily_timestamps"] if ts >= day_ago]
     
     hourly_count = len(rec["hourly_timestamps"])
+    daily_count = len(rec["daily_timestamps"])
     monthly_count = rec["monthly_count"]
     
-    # Check limits
-    if hourly_count >= limits["hourly"]:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Rate limit exceeded: {limits['hourly']} requests per hour for {tier} tier"
-        )
-    
-    if monthly_count >= limits["monthly"]:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Monthly limit reached: {limits['monthly']} requests for {tier} tier. Upgrade to continue."
-        )
+    # Check limits based on tier
+    if tier == "free":
+        if daily_count >= limits["daily"]:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Daily limit reached: {limits['daily']} requests per day for free tier. Upgrade to continue."
+            )
+    else:
+        # Pro/Enterprise - check hourly
+        if hourly_count >= limits.get("hourly", 999):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded: {limits['hourly']} requests per hour for {tier} tier"
+            )
+        
+        # Check monthly
+        if monthly_count >= limits.get("monthly", 999999):
+            raise HTTPException(
+                status_code=429,
+                detail=f"Monthly limit reached: {limits['monthly']} requests for {tier} tier. Upgrade to continue."
+            )
     
     # Record usage
     rec["hourly_timestamps"].append(now)
+    rec["daily_timestamps"].append(now)
     rec["monthly_count"] += 1

@@ -187,28 +187,46 @@ def check_rate_limit_status(request: Request):
     if api_key in _usage_store:
         rec = _usage_store[api_key]
         hourly_count = len(rec.get("hourly_timestamps", []))
+        daily_count = len(rec.get("daily_timestamps", []))
         monthly_count = rec.get("monthly_count", 0)
     else:
         hourly_count = 0
+        daily_count = 0
         monthly_count = 0
     
-    hourly_remaining = max(limits["hourly"] - hourly_count, 0)
-    monthly_remaining = max(limits["monthly"] - monthly_count, 0)
+    # Build response based on tier
+    response = {"tier": tier}
     
-    return {
-        "tier": tier,
-        "hourly": {
+    if tier == "free":
+        # Free tier only has daily limit
+        daily_limit = limits.get("daily", 5)
+        daily_remaining = max(daily_limit - daily_count, 0)
+        response["daily"] = {
+            "used": daily_count,
+            "limit": daily_limit,
+            "remaining": daily_remaining
+        }
+        response["is_rate_limited"] = daily_count >= daily_limit
+    else:
+        # Pro/Enterprise have hourly and monthly
+        hourly_limit = limits.get("hourly", 20)
+        monthly_limit = limits.get("monthly", 100)
+        hourly_remaining = max(hourly_limit - hourly_count, 0)
+        monthly_remaining = max(monthly_limit - monthly_count, 0)
+        
+        response["hourly"] = {
             "used": hourly_count,
-            "limit": limits["hourly"],
+            "limit": hourly_limit,
             "remaining": hourly_remaining
-        },
-        "monthly": {
+        }
+        response["monthly"] = {
             "used": monthly_count,
-            "limit": limits["monthly"],
+            "limit": monthly_limit,
             "remaining": monthly_remaining
-        },
-        "is_rate_limited": hourly_count >= limits["hourly"] or monthly_count >= limits["monthly"]
-    }
+        }
+        response["is_rate_limited"] = hourly_count >= hourly_limit or monthly_count >= monthly_limit
+    
+    return response
 # --------------------------------------------------------------------
 # Parser helpers
 # --------------------------------------------------------------------
